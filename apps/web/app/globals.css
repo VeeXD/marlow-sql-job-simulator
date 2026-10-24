@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+:root {
+  --paper: #f3ecdf;
+  --ink: #1c1915;
+  --card: #fffaf3;
+  --line: #e3d6c4;
+  --pine: #1e4a42;
+  --pine-ink: #f4f7f4;
+  --clay: #8f3d32;
+  --navy: #1b2430;
+  --moss: #3f6b4a;
+  --muted: #6b6258;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --color-card: var(--card);
+  --color-line: var(--line);
+  --color-pine: var(--pine);
+  --color-pine-ink: var(--pine-ink);
+  --color-clay: var(--clay);
+  --color-navy: var(--navy);
+  --color-moss: var(--moss);
+  --color-muted: var(--muted);
+  --font-sans: var(--font-geist-sans);
+  --font-serif: var(--font-newsreader);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), "Segoe UI", sans-serif;
+}
+
+::selection {
+  background: #d5e6df;
+}

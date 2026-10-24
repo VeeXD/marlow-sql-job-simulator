@@ -1,0 +1,33 @@
+{
+  "name": "@sim/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "seed": "tsx src/seed-cli.ts",
+    "test:e2e": "vitest run",
+    "proxy": "tsx src/proxy.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.1.0",
+    "@sim/engine": "*",
+    "bullmq": "^5.61.0",
+    "fastify": "^5.6.1",
+    "http-proxy": "^1.18.1",
+    "ioredis": "^5.8.1",
+    "pg": "^8.16.3",
+    "socket.io": "^4.8.1",
+    "tsx": "^4.20.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/http-proxy": "^1.17.17",
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.15.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

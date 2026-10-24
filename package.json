@@ -1,0 +1,27 @@
+{
+  "name": "sql-job-simulator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A simulated data job. Release 1 is one e-commerce project on Postgres.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web,proxy -c blue,green,magenta \"npm run dev -w @sim/server\" \"npm run dev -w @sim/web\" \"npm run proxy -w @sim/server\"",
+    "build": "npm run build -w @sim/web",
+    "start": "concurrently -n api,web,proxy -c blue,green,magenta \"npm run start -w @sim/server\" \"npm run start -w @sim/web\" \"npm run proxy -w @sim/server\"",
+    "test": "npm run test -w @sim/engine && npm run test:e2e -w @sim/server",
+    "test:unit": "npm run test -w @sim/engine",
+    "test:e2e": "npm run test:e2e -w @sim/server",
+    "probe": "npm run probe -w @sim/engine",
+    "seed": "npm run seed -w @sim/server",
+    "typecheck": "npm run typecheck -w @sim/engine && npm run typecheck -w @sim/server && npm run typecheck -w @sim/web"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

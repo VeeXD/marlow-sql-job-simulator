@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: sim
+      POSTGRES_PASSWORD: sim
+      POSTGRES_DB: sim
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sim -d sim"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build: .
+    ports:
+      - "3847:3847"
+    environment:
+      DATABASE_URL: postgres://sim:sim@postgres:5432/sim
+      REDIS_URL: redis://redis:6379
+      PUBLIC_PG_HOST: localhost
+      PUBLIC_PG_PORT: 5432
+      LLM_PROVIDER: mock
+      WEB_PORT: 3847
+      WEB_INTERNAL_PORT: 3846
+      API_PORT: 3848
+      SIM_SPEED: "120"
+      ENABLE_WORKER: "true"
+      ALLOW_DEBUG_CLOCK: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3847/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+volumes:
+  pgdata:
