@@ -17,6 +17,7 @@ export function SetupForm() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [hasDesk, setHasDesk] = useState(false);
+  const [consent, setConsent] = useState(false);
 
   async function load() {
     setLoadError(null);
@@ -39,7 +40,7 @@ export function SetupForm() {
     try {
       const created = await api<{ id: string; token: string }>("/api/sessions", null, {
         method: "POST",
-        body: JSON.stringify({ playerName: name.trim(), difficulty }),
+        body: JSON.stringify({ playerName: name.trim(), difficulty, consent: true }),
       });
       const { writeStoredSession } = await import("@/lib/api");
       writeStoredSession({ id: created.id, token: created.token });
@@ -60,9 +61,16 @@ export function SetupForm() {
       </p>
 
       {hasDesk ? (
-        <Link href="/play" className="mt-6 text-sm font-medium text-pine underline-offset-4 hover:underline">
-          Back to the desk you already opened
-        </Link>
+        <p className="mt-6 flex flex-wrap gap-4 text-sm font-medium">
+          <Link href="/play" className="text-pine underline-offset-4 hover:underline">
+            Back to the desk you already opened
+          </Link>
+          {world?.signalsPage ? (
+            <Link href="/signals" className="text-pine underline-offset-4 hover:underline">
+              Signals (experimental)
+            </Link>
+          ) : null}
+        </p>
       ) : null}
 
       {loadError ? (
@@ -141,9 +149,24 @@ export function SetupForm() {
             </div>
           </fieldset>
 
+          <label className="flex items-start gap-3 rounded-lg border border-line bg-card p-4 text-sm leading-relaxed">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={consent}
+              onChange={(event) => setConsent(event.target.checked)}
+              required
+            />
+            <span>
+              Practice mode records queries, messages, and timings. Checking this also records paste size, when the
+              window loses focus, and a typing-cadence summary — not the text you paste or the keys themselves.
+              Experimental. Not a hiring score. Kept with the session for 90 days. Nothing deletes it automatically yet.
+            </span>
+          </label>
+
           {submitError ? <p className="text-sm text-clay">{submitError}</p> : null}
 
-          <Button type="submit" size="lg" disabled={submitting || name.trim().length === 0}>
+          <Button type="submit" size="lg" disabled={submitting || name.trim().length === 0 || !consent}>
             {submitting ? "Setting up your database…" : "Sit down at the desk"}
           </Button>
         </form>

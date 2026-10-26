@@ -109,6 +109,28 @@ export type ReviewState = {
   };
 };
 
+export type ConsentState = {
+  practiceTelemetry: boolean;
+  integritySignals: boolean;
+  retentionDays: number;
+  notice: string;
+};
+
+export type BreakKind = "late_data" | "schema_drift" | "null_spike";
+
+export type QuerySignal = {
+  sqlHash: string;
+  durationMs: number;
+  rowsReturned: number;
+  rowsScannedEstimate: number | null;
+  errorClass: string | null;
+  engine: "postgres";
+  followsError: boolean;
+  profiling: boolean;
+  truncated: boolean;
+  capApplied: boolean;
+};
+
 export type SessionState = {
   playerName: string;
   difficulty: Difficulty;
@@ -145,6 +167,12 @@ export type SessionState = {
   runs: PipelineRun[];
   scheduledRunKeys: string[];
   llmTokensUsed: number;
+  consent: ConsentState;
+  cohort: { active: boolean; completed: boolean };
+  lastQueryFailed: boolean;
+  pressureOpen: boolean;
+  scenarioVersion: string;
+  seed: string;
 };
 
 export type TelemetryEventName =
@@ -155,6 +183,18 @@ export type TelemetryEventName =
   | "error_returned"
   | "chat_message_sent"
   | "clarifying_question_asked"
+  | "clarifying_question"
+  | "schema_explored"
+  | "suggestion_made"
+  | "improvement_beyond_scope"
+  | "escalation"
+  | "priority_decision"
+  | "deadline_event"
+  | "pressure_window_start"
+  | "pressure_window_end"
+  | "message_sent"
+  | "integrity_signal"
+  | "consent_recorded"
   | "pipeline_step_created"
   | "pipeline_run"
   | "break_detected"
@@ -181,15 +221,21 @@ export type SpeakEffect = {
 export type Effect =
   | SpeakEffect
   | { type: "telemetry"; name: TelemetryEventName; payload: Record<string, unknown> }
-  | { type: "inject_break" }
+  | { type: "inject_break"; kind: BreakKind }
   | { type: "release_ticket"; ticketId: string };
 
 export type DirectorEvent =
   | { type: "start" }
   | { type: "tick"; simNow: string; realNow: number; paused: boolean }
   | { type: "activity"; realNow: number }
-  | { type: "player_message"; channel: string; body: string }
-  | { type: "query"; ok: boolean; errorMessage?: string | null; tables: string[] }
+  | { type: "player_message"; channel: string; body: string; wallLatencyMs?: number | null }
+  | {
+      type: "query";
+      ok: boolean;
+      errorMessage?: string | null;
+      tables: string[];
+      signal?: QuerySignal;
+    }
   | { type: "open_ticket"; ticketId: string }
   | { type: "submit"; ticketId: string; grade: GradeResult }
   | { type: "save_pipeline"; steps: PipelineStep[]; schedule: Schedule }

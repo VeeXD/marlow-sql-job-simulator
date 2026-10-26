@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS telemetry_session_idx ON telemetry_events (session_id, id);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS consent jsonb;
+ALTER TABLE telemetry_events ADD COLUMN IF NOT EXISTS scenario_version text;
+ALTER TABLE telemetry_events ADD COLUMN IF NOT EXISTS seed text;
+ALTER TABLE telemetry_events ADD COLUMN IF NOT EXISTS wall_time timestamptz;
+CREATE INDEX IF NOT EXISTS telemetry_name_idx ON telemetry_events (session_id, event_name);
 `;
 
 export async function migrate(): Promise<void> {
@@ -45,13 +50,13 @@ export async function migrate(): Promise<void> {
 
 export async function waitForDatabase(): Promise<void> {
   let last: unknown;
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 90; i++) {
     try {
       await pool.query("SELECT 1");
       return;
     } catch (err) {
       last = err;
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
   throw last;

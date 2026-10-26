@@ -5,6 +5,7 @@ export * from "./clarify.js";
 export * from "./handoff.js";
 export * from "./sql.js";
 export * from "./telemetry.js";
+export * from "./signals.js";
 export * from "./seed.js";
 export * from "./reference.js";
 export * from "./runner.js";

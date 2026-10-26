@@ -70,6 +70,15 @@ FROM ${source}
 GROUP BY 1
 `.trim();
 
+export const COHORT_SELECT = `
+SELECT
+  customer_id,
+  COUNT(*)::int AS order_count,
+  (COUNT(*) >= 2) AS repeat_buyer
+FROM clean_orders
+GROUP BY customer_id
+`.trim();
+
 export const REFERENCE_PLAN = `
 Deduplicate with ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY loaded_at DESC).
 Exclude order_refunded and order_cancelled from raw_events.

@@ -15,8 +15,10 @@ import {
   postQuery,
   runPipelineNow,
   savePipeline,
+  recordSignal,
   schemaFor,
   setRefreshHook,
+  signalsFor,
   submitHandoff,
   submitTicket,
   telemetryFor,
@@ -51,7 +53,13 @@ export async function buildApp() {
   app.get("/api/world", async () => worldBrief());
 
   app.post("/api/sessions", async (request) => {
-    const body = z.object({ playerName: z.string().trim().min(1).max(40), difficulty }).parse(request.body);
+    const body = z
+      .object({
+        playerName: z.string().trim().min(1).max(40),
+        difficulty,
+        consent: z.literal(true, { message: "Practice-mode recording has to be accepted before a desk opens." }),
+      })
+      .parse(request.body);
     return createSession(body.playerName, body.difficulty);
   });
 
@@ -141,6 +149,29 @@ export async function buildApp() {
   app.get("/api/sessions/:id/telemetry", async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     return telemetryFor(id, tokenFrom(request.headers.authorization));
+  });
+
+  app.get("/api/sessions/:id/signals", async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    return signalsFor(id, tokenFrom(request.headers.authorization));
+  });
+
+  app.post("/api/sessions/:id/signals", async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z
+      .discriminatedUnion("kind", [
+        z.object({ kind: z.literal("erd_opened") }),
+        z.object({ kind: z.literal("table_previewed"), table: z.string().trim().min(1).max(80) }),
+        z.object({ kind: z.literal("paste"), pasteChars: z.number().int().min(0).max(1_000_000) }),
+        z.object({ kind: z.literal("focus_loss") }),
+        z.object({
+          kind: z.literal("typing_cadence"),
+          keyCount: z.number().int().min(1).max(10_000),
+          medianIntervalMs: z.number().int().min(0).max(600_000),
+        }),
+      ])
+      .parse(request.body);
+    return recordSignal(id, tokenFrom(request.headers.authorization), body);
   });
 
   return app;

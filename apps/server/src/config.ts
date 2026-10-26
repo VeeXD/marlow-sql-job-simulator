@@ -15,6 +15,12 @@ export const config = {
   posthogKey: process.env.POSTHOG_KEY ?? "",
   posthogHost: process.env.POSTHOG_HOST ?? "https://app.posthog.com",
   logLevel: process.env.LOG_LEVEL ?? "info",
+  signalsPage:
+    process.env.ALLOW_SIGNALS_PAGE === "false"
+      ? false
+      : process.env.ALLOW_SIGNALS_PAGE === "true"
+        ? true
+        : process.env.NODE_ENV !== "production",
 };
 
 export function databaseUrl(database: string, user?: string, password?: string): string {

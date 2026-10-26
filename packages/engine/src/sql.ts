@@ -175,8 +175,101 @@ export async function runScript(exec: SqlExec, sql: string): Promise<void> {
 
 export function tablesTouched(sql: string): string[] {
   const scan = stripCommentsAndStrings(sql).toLowerCase();
-  const names = ["raw_orders", "raw_events", "clean_orders", "churn_features", "daily_revenue"];
+  const names = ["raw_orders", "raw_events", "clean_orders", "churn_features", "daily_revenue", "repeat_cohorts"];
   return names.filter((n) => new RegExp(`\\b${n}\\b`).test(scan));
+}
+
+type LimitHit = { kind: "number"; value: number; numberStart: number; numberEnd: number } | { kind: "other" };
+
+function findTopLevelLimit(statement: string): LimitHit | null {
+  const s = statement;
+  let i = 0;
+  let depth = 0;
+  let last: LimitHit | null = null;
+  while (i < s.length) {
+    const c = s[i];
+    const n = s[i + 1];
+    if (c === "-" && n === "-") {
+      const end = s.indexOf("\n", i);
+      i = end === -1 ? s.length : end + 1;
+      continue;
+    }
+    if (c === "/" && n === "*") {
+      const end = s.indexOf("*/", i + 2);
+      i = end === -1 ? s.length : end + 2;
+      continue;
+    }
+    if (c === "'") {
+      i++;
+      while (i < s.length) {
+        if (s[i] === "'" && s[i + 1] === "'") {
+          i += 2;
+          continue;
+        }
+        if (s[i] === "'") {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (c === "$") {
+      const tag = /^\$[A-Za-z0-9_]*\$/.exec(s.slice(i));
+      if (tag) {
+        const end = s.indexOf(tag[0], i + tag[0].length);
+        i = end === -1 ? s.length : end + tag[0].length;
+        continue;
+      }
+    }
+    if (c === "(") {
+      depth++;
+      i++;
+      continue;
+    }
+    if (c === ")") {
+      depth = Math.max(0, depth - 1);
+      i++;
+      continue;
+    }
+    const prev = i === 0 ? " " : s[i - 1];
+    if (depth === 0 && !/[A-Za-z0-9_]/.test(prev) && /^limit\b/i.test(s.slice(i))) {
+      let j = i + "limit".length;
+      while (j < s.length && /\s/.test(s[j])) j++;
+      const num = /^(\d+)/.exec(s.slice(j));
+      if (num) {
+        last = { kind: "number", value: Number(num[1]), numberStart: j, numberEnd: j + num[1].length };
+      } else {
+        last = { kind: "other" };
+      }
+      i = num ? j + num[1].length : j;
+      continue;
+    }
+    i++;
+  }
+  return last;
+}
+
+/**
+ * Push the row cap into a read statement. Fetch cap+1 so the caller can see
+ * truncation without buffering the rest of the result. Writes are unchanged.
+ */
+export function applyRowCap(statement: string, cap: number): { sql: string; capApplied: boolean } {
+  const scan = stripCommentsAndStrings(statement).trim();
+  if (!/^(select|with|table|values|show)\b/i.test(scan)) return { sql: statement, capApplied: false };
+  const fetch = cap + 1;
+  const limit = findTopLevelLimit(statement);
+  if (limit?.kind === "number") {
+    if (limit.value <= cap) return { sql: statement, capApplied: false };
+    return {
+      sql: statement.slice(0, limit.numberStart) + String(fetch) + statement.slice(limit.numberEnd),
+      capApplied: true,
+    };
+  }
+  if (limit?.kind === "other") {
+    return { sql: `SELECT * FROM (\n${statement}\n) AS _row_cap LIMIT ${fetch}`, capApplied: true };
+  }
+  return { sql: `${statement}\nLIMIT ${fetch}`, capApplied: true };
 }
 
 export function failed(id: string, detail: string): GradeCheck {

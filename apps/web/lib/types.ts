@@ -20,6 +20,7 @@ export type World = {
   project: Project;
   cast: CastMember[];
   nextProject: { id: string; title: string; summary: string; status: "stub" };
+  signalsPage?: boolean;
 };
 
 export type ChatMessage = {
@@ -85,6 +86,16 @@ export type Session = {
     logs: { name: string; ok: boolean; error?: string; durationMs: number }[];
   }[];
   orderDefinitionUnlocked: boolean;
+  consent: {
+    practiceTelemetry: boolean;
+    integritySignals: boolean;
+    retentionDays: number;
+    notice: string;
+  };
+  cohort: { active: boolean; completed: boolean };
+  scenarioVersion: string;
+  seed: string;
+  signalsPage: boolean;
   connection: {
     engine: "postgres";
     host: string;

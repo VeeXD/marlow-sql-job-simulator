@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { gradeCleanOrders, gradeConsumers, gradePipelineMeta } from "../src/grading.js";
-import { referencePipelineSteps } from "../src/reference.js";
+import { gradeCleanOrders, gradeConsumers, gradePipelineMeta, gradeRepeatCohorts } from "../src/grading.js";
+import { COHORT_SELECT, referencePipelineSteps } from "../src/reference.js";
 import { runPipeline } from "../src/runner.js";
 import { SqlRejected, assertSafe, runScript, splitSql } from "../src/sql.js";
-import { buildWorldSeed } from "../src/seed.js";
+import { buildWorldSeed, nullSpikeSql, schemaDriftSql } from "../src/seed.js";
 import { freshDb } from "./helpers.js";
 
 describe("seed and grading", () => {
@@ -100,6 +100,26 @@ describe("seed and grading", () => {
     expect(Number(afterCount.rows[0].n)).not.toBe(Number(before.rows[0].n));
     expect(await present(manifest.breakNewIds[0])).toBe(true);
     expect(await present(manifest.breakRefundIds[0])).toBe(false);
+
+    await runScript(exec, schemaDriftSql());
+    await runScript(exec, nullSpikeSql());
+    await runScript(exec, schemaDriftSql());
+    await runScript(exec, nullSpikeSql());
+    const withExtras = await gradeCleanOrders(exec);
+    expect(withExtras.passed, JSON.stringify(withExtras.checks)).toBe(true);
+    const promo = await exec.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_name = 'raw_orders' AND column_name = 'promo_code'`,
+    );
+    expect(promo.rows.length).toBe(1);
+    const spike = await exec.query(
+      `SELECT COUNT(*)::int AS n FROM raw_orders WHERE source_file = 'orders_2024_06_null_spike.csv'`,
+    );
+    expect(Number(spike.rows[0].n)).toBe(6);
+
+    await exec.query(`CREATE TABLE repeat_cohorts AS ${COHORT_SELECT}`);
+    await exec.query(`ALTER TABLE repeat_cohorts ADD PRIMARY KEY (customer_id)`);
+    const cohort = await gradeRepeatCohorts(exec);
+    expect(cohort.passed, JSON.stringify(cohort.checks)).toBe(true);
 
     expect(
       gradePipelineMeta({ stepCount: 3, enabled: true, cadence: "daily", successfulRun: true }).passed,

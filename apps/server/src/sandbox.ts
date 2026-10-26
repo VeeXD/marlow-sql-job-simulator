@@ -2,15 +2,21 @@ import pg from "pg";
 import { randomBytes } from "node:crypto";
 import {
   LATE_SOURCE_FILE,
+  applyRowCap,
   getWorldSeed,
   gradeCleanOrders,
   gradeConsumers,
   gradePipelineMeta,
+  gradeRepeatCohorts,
+  nullSpikeSql,
   runPipeline,
   runScript,
+  schemaDriftSql,
   splitSql,
   assertSafe,
+  stripCommentsAndStrings,
   tablesTouched,
+  type BreakKind,
   type GradeResult,
   type SqlExec,
   type StepLog,
@@ -119,13 +125,21 @@ export async function dropSandbox(handle: SandboxHandle): Promise<void> {
   await pool.query(`DROP ROLE IF EXISTS ${handle.sandboxUser}`);
 }
 
-export async function injectBreak(handle: SandboxHandle): Promise<void> {
+export async function injectBreak(handle: SandboxHandle, kind: BreakKind = "late_data"): Promise<void> {
   const client = clientFor(handle.sandboxDb);
   await client.connect();
   try {
-    const existing = await client.query(`SELECT 1 FROM raw_orders WHERE source_file = $1 LIMIT 1`, [LATE_SOURCE_FILE]);
-    if (existing.rows.length > 0) return;
-    await runScript(asExec(client), getWorldSeed().breakSql);
+    if (kind === "late_data") {
+      const existing = await client.query(`SELECT 1 FROM raw_orders WHERE source_file = $1 LIMIT 1`, [LATE_SOURCE_FILE]);
+      if (existing.rows.length > 0) return;
+      await runScript(asExec(client), getWorldSeed().breakSql);
+      return;
+    }
+    if (kind === "schema_drift") {
+      await runScript(asExec(client), schemaDriftSql());
+      return;
+    }
+    await runScript(asExec(client), nullSpikeSql());
   } finally {
     await client.end();
   }
@@ -137,12 +151,15 @@ export type StatementResult = {
   fields: string[];
   rows: Record<string, unknown>[];
   truncated: boolean;
+  capApplied: boolean;
+  rowsScannedEstimate: number | null;
 };
 
 export type PlayerQueryResult = {
   ok: boolean;
   statements: StatementResult[];
   durationMs: number;
+  rowsScannedEstimate: number | null;
   error: {
     message: string;
     code?: string;
@@ -157,13 +174,13 @@ export async function runPlayerQuery(handle: SandboxHandle, sql: string): Promis
   const started = Date.now();
   const statements = splitSql(sql);
   if (statements.length === 0) {
-    return { ok: false, statements: [], durationMs: 0, error: { message: "No SQL to run." } };
+    return { ok: false, statements: [], durationMs: 0, rowsScannedEstimate: null, error: { message: "No SQL to run." } };
   }
   if (statements.length > 25) {
-    return { ok: false, statements: [], durationMs: 0, error: { message: "Too many statements in one run (max 25)." } };
+    return { ok: false, statements: [], durationMs: 0, rowsScannedEstimate: null, error: { message: "Too many statements in one run (max 25)." } };
   }
   if (sql.length > 100_000) {
-    return { ok: false, statements: [], durationMs: 0, error: { message: "SQL is too large." } };
+    return { ok: false, statements: [], durationMs: 0, rowsScannedEstimate: null, error: { message: "SQL is too large." } };
   }
   for (const statement of statements) {
     try {
@@ -173,6 +190,7 @@ export async function runPlayerQuery(handle: SandboxHandle, sql: string): Promis
         ok: false,
         statements: [],
         durationMs: Date.now() - started,
+        rowsScannedEstimate: null,
         error: { message: err instanceof Error ? err.message : String(err) },
       };
     }
@@ -183,15 +201,20 @@ export async function runPlayerQuery(handle: SandboxHandle, sql: string): Promis
   try {
     await client.query(`SET statement_timeout = '${config.statementTimeoutMs}ms'`);
     for (const statement of statements) {
+      const capped = applyRowCap(statement, config.rowCap);
+      const rowsScannedEstimate = isReadStatement(statement) ? await estimateScanned(handle, capped.sql) : null;
       try {
-        const result = await client.query(statement);
-        const rows = result.rows.slice(0, config.rowCap);
+        const result = await client.query(capped.sql);
+        const truncated = capped.capApplied && result.rows.length > config.rowCap;
+        const rows = truncated ? result.rows.slice(0, config.rowCap) : result.rows;
         results.push({
           command: result.command,
-          rowCount: result.rowCount,
+          rowCount: truncated ? rows.length : result.rowCount,
           fields: result.fields.map((field) => field.name),
           rows,
-          truncated: result.rows.length > config.rowCap,
+          truncated,
+          capApplied: capped.capApplied,
+          rowsScannedEstimate,
         });
       } catch (err) {
         const pgErr = err as pg.DatabaseError;
@@ -199,6 +222,7 @@ export async function runPlayerQuery(handle: SandboxHandle, sql: string): Promis
           ok: false,
           statements: results,
           durationMs: Date.now() - started,
+          rowsScannedEstimate: sumEstimates(results),
           error: {
             message: pgErr.message,
             code: pgErr.code,
@@ -213,7 +237,41 @@ export async function runPlayerQuery(handle: SandboxHandle, sql: string): Promis
   } finally {
     await client.end();
   }
-  return { ok: true, statements: results, durationMs: Date.now() - started, error: null };
+  return { ok: true, statements: results, durationMs: Date.now() - started, rowsScannedEstimate: sumEstimates(results), error: null };
+}
+
+function isReadStatement(statement: string): boolean {
+  return /^(select|with|table|values|show)\b/i.test(stripCommentsAndStrings(statement).trim());
+}
+
+function sumEstimates(results: StatementResult[]): number | null {
+  const known = results.map((item) => item.rowsScannedEstimate).filter((value): value is number => value != null);
+  if (known.length === 0) return null;
+  return known.reduce((sum, value) => sum + value, 0);
+}
+
+function sumScanRows(node: { "Node Type"?: string; "Plan Rows"?: number; Plans?: unknown[] } | null | undefined): number {
+  if (!node) return 0;
+  const type = node["Node Type"] ?? "";
+  const self = /Scan/.test(type) && typeof node["Plan Rows"] === "number" ? node["Plan Rows"] : 0;
+  const children = (node.Plans ?? []).reduce<number>((sum, child) => sum + sumScanRows(child as typeof node), 0);
+  return self + children;
+}
+
+/** Planner estimate only. A separate connection so a failed EXPLAIN cannot abort the player's transaction. */
+async function estimateScanned(handle: SandboxHandle, sql: string): Promise<number | null> {
+  const client = clientFor(handle.sandboxDb, handle.sandboxUser, handle.sandboxPassword);
+  try {
+    await client.connect();
+    await client.query(`SET statement_timeout = '${config.statementTimeoutMs}ms'`);
+    const explained = await client.query(`EXPLAIN (FORMAT JSON) ${sql}`);
+    const plan = explained.rows[0]?.["QUERY PLAN"] as { Plan?: { "Node Type"?: string; "Plan Rows"?: number; Plans?: unknown[] } }[] | undefined;
+    return sumScanRows(plan?.[0]?.Plan);
+  } catch {
+    return null;
+  } finally {
+    await client.end().catch(() => undefined);
+  }
 }
 
 export async function introspect(handle: SandboxHandle): Promise<{ table: string; columns: { name: string; dataType: string; nullable: boolean }[] }[]> {
@@ -254,7 +312,7 @@ export async function runSavedPipeline(
 
 export async function gradeSandbox(
   handle: SandboxHandle,
-  kind: "clean" | "pipeline" | "break",
+  kind: "clean" | "pipeline" | "break" | "cohort",
   meta: { stepCount: number; enabled: boolean; cadence: string; successfulRun: boolean },
 ): Promise<GradeResult> {
   const client = clientFor(handle.sandboxDb);
@@ -262,6 +320,7 @@ export async function gradeSandbox(
   try {
     await client.query(`SET statement_timeout = '30s'`);
     const exec = asExec(client);
+    if (kind === "cohort") return await gradeRepeatCohorts(exec);
     if (kind === "clean") return await gradeCleanOrders(exec);
     const clean = await gradeCleanOrders(exec);
     const consumers = await gradeConsumers(exec);

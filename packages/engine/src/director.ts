@@ -1,7 +1,16 @@
-import { isOrderDefinitionQuestion, isStatusUpdate, isSuggestion } from "./clarify.js";
+import { isDelayFlag, isOrderDefinitionQuestion, isStatusUpdate, isSuggestion } from "./clarify.js";
 import { addMinutes, minutesBetween, minutesSinceStart, SIM_START_ISO } from "./clock.js";
 import { gradeHandoff } from "./handoff.js";
 import { redactSql } from "./prompt.js";
+import {
+  CONSENT_NOTICE,
+  RETENTION_DAYS,
+  SCENARIO_VERSION,
+  SEED_LABEL,
+  contentHash,
+  isEscalation,
+  isImprovementBeyondScope,
+} from "./signals.js";
 import { isAccessLocked } from "./telemetry.js";
 import type {
   Difficulty,
@@ -61,6 +70,15 @@ const PIPELINE_BODY = `Sam needs \`churn_features\`. Riley needs \`daily_revenue
 - \`aov\` — \`gross_revenue\` / \`order_count\` as real division
 
 Your database session is already set to UTC.`;
+
+const PIPELINE_BODY_STANDARD = `Daily pipeline at 06:00 Pacific. Ordered SQL steps, rebuilt from the landing zone.
+
+\`churn_features\`: unique \`customer_id\`; \`as_of_date\` is the UTC date of the latest \`ordered_at\` in \`clean_orders\`; \`orders_30d\` and \`revenue_30d\` on the inclusive window [\`as_of_date\` - 29 days, \`as_of_date\`]; \`days_since_last_order\`; one row per customer.
+
+\`daily_revenue\`: unique \`revenue_date\` (UTC date of \`ordered_at\`); \`order_count\`; \`gross_revenue\`; \`aov\` as real division.`;
+
+const COHORT_RULE =
+  "`repeat_cohorts` has one row per customer in `clean_orders`, a unique `customer_id`, `order_count`, and `repeat_buyer` true exactly when `order_count` is at least 2.";
 
 export type TimelineFact = { id: string; person: string; noun: string; done: boolean };
 
@@ -125,9 +143,14 @@ function ticket(
   };
 }
 
-export function createInitialState(input: { playerName: string; difficulty: Difficulty }): SessionState {
+export function createInitialState(input: {
+  playerName: string;
+  difficulty: Difficulty;
+  consent?: SessionState["consent"];
+}): SessionState {
   const name = input.playerName.trim() || "Alex Morgan";
   const standing = { priya: 72, jonah: 72, sam: 72, riley: 72 };
+  const guided = input.difficulty === "guided";
   return {
     playerName: name,
     difficulty: input.difficulty,
@@ -145,11 +168,12 @@ export function createInitialState(input: { playerName: string; difficulty: Diff
         id: "explore",
         key: "MO-1",
         title: "Explore the landing zone",
-        body: "Jonah's files are `raw_orders` and `raw_events`. They are dumps, not a model. Query both until you can describe the mess in your own words.",
-        coachNotes:
-          input.difficulty === "guided"
-            ? "Start with row counts, distinct `order_id`s, and where nulls sit. Don't build `clean_orders` on this ticket."
-            : null,
+        body: guided
+          ? "Jonah's files are `raw_orders` and `raw_events`. They are dumps, not a model. Query both until you can describe the mess in your own words."
+          : "The landing zone is already in your database. Learn it before you build. The evaluation rule names the tables.",
+        coachNotes: guided
+          ? "Start with row counts, distinct `order_id`s, and where nulls sit. Don't build `clean_orders` on this ticket."
+          : null,
         evaluationRule: "A successful query has run against `raw_orders` and against `raw_events`.",
         hiddenEvaluation: null,
         dueAt: addMinutes(SIM_START_ISO, 9 * 60),
@@ -159,11 +183,12 @@ export function createInitialState(input: { playerName: string; difficulty: Diff
         id: "definition",
         key: "MO-2",
         title: "Agree what counts as an order",
-        body: "Finance and growth don't use the same order. I won't sign a table until the rule is written down. Ask me before you build — guessing doesn't unlock it.",
-        coachNotes:
-          input.difficulty === "guided"
-            ? "The fight is about which rows belong in the table. Priya will answer a direct question. She will not volunteer the rule."
-            : null,
+        body: guided
+          ? "Finance and growth don't use the same order. I won't sign a table until the rule is written down. Ask me before you build — guessing doesn't unlock it."
+          : "We have not agreed what an order is. Don't guess, and don't build until we have.",
+        coachNotes: guided
+          ? "The fight is about which rows belong in the table. Priya will answer a direct question. She will not volunteer the rule."
+          : null,
         evaluationRule: "Hidden until you and Priya agree what counts as an order.",
         hiddenEvaluation: ORDER_DEFINITION,
         dueAt: addMinutes(SIM_START_ISO, 33 * 60),
@@ -173,11 +198,12 @@ export function createInitialState(input: { playerName: string; difficulty: Diff
         id: "clean",
         key: "MO-3",
         title: "Build clean_orders",
-        body: `Build \`clean_orders\` from the landing zone using the rule on this ticket. Put a primary key or unique constraint on \`order_id\`, and mark \`order_id\`, \`customer_id\`, \`ordered_at\`, and \`amount_cents\` NOT NULL. \`ordered_at\` is timestamptz.`,
-        coachNotes:
-          input.difficulty === "guided"
-            ? "Worth a look: repeated `order_id`s, `order_status`, refund and cancel events on `raw_events`, and rows that only have `ordered_at_local`."
-            : null,
+        body: guided
+          ? "Build `clean_orders` from the landing zone using the rule on this ticket. Put a primary key or unique constraint on `order_id`, and mark `order_id`, `customer_id`, `ordered_at`, and `amount_cents` NOT NULL. `ordered_at` is timestamptz."
+          : "Build `clean_orders` to the evaluation rule on this ticket. The constraints are part of done.",
+        coachNotes: guided
+          ? "Worth a look: repeated `order_id`s, `order_status`, refund and cancel events on `raw_events`, and rows that only have `ordered_at_local`."
+          : null,
         evaluationRule: CLEAN_RULE,
         hiddenEvaluation: null,
         dueAt: addMinutes(SIM_START_ISO, 57 * 60),
@@ -187,11 +213,10 @@ export function createInitialState(input: { playerName: string; difficulty: Diff
         id: "pipeline",
         key: "MO-4",
         title: "Daily pipeline for churn and revenue",
-        body: PIPELINE_BODY,
-        coachNotes:
-          input.difficulty === "guided"
-            ? "Three steps is a natural shape: rebuild `clean_orders`, then `churn_features`, then `daily_revenue`. Run it once before you submit."
-            : null,
+        body: guided ? PIPELINE_BODY : PIPELINE_BODY_STANDARD,
+        coachNotes: guided
+          ? "Three steps is a natural shape: rebuild `clean_orders`, then `churn_features`, then `daily_revenue`. Run it once before you submit."
+          : null,
         evaluationRule: PIPELINE_RULE,
         hiddenEvaluation: null,
         dueAt: addMinutes(SIM_START_ISO, 75 * 60),
@@ -201,14 +226,28 @@ export function createInitialState(input: { playerName: string; difficulty: Diff
         id: "break",
         key: "MO-5",
         title: "Late file and handoff",
-        body: "A file landed after a run. Riley's chart and Sam's features can drift from the landing zone when that happens. Rebuild from raw, tell them what moved, and leave a handoff note the next analyst can trust.",
-        coachNotes:
-          input.difficulty === "guided"
-            ? "Check `source_file` for a drop you haven't seen. Then rerun the pipeline. The handoff box is on this ticket."
-            : null,
+        body: guided
+          ? "A file landed after a run. Riley's chart and Sam's features can drift from the landing zone when that happens. Rebuild from raw, tell them what moved, and leave a handoff note the next analyst can trust."
+          : "The landing zone moved after a run. Rebuild, tell the consumers, and leave a handoff note.",
+        coachNotes: guided
+          ? "Check `source_file` for a drop you haven't seen. Then rerun the pipeline. The handoff box is on this ticket."
+          : null,
         evaluationRule: BREAK_RULE,
         hiddenEvaluation: null,
         dueAt: addMinutes(SIM_START_ISO, 81 * 60),
+        released: false,
+      }),
+      ticket({
+        id: "cohort",
+        key: "RC-1",
+        title: "Repeat buyers",
+        body: guided
+          ? "From `clean_orders`, build `repeat_cohorts`. One row per `customer_id`. `order_count` is how many clean orders they have. `repeat_buyer` is true when that count is at least 2. Put a primary key on `customer_id`."
+          : "Build `repeat_cohorts` from `clean_orders`. The evaluation rule is the contract.",
+        coachNotes: guided ? "This is one table. It reads `clean_orders` only. Don't reopen the landing-zone fight." : null,
+        evaluationRule: COHORT_RULE,
+        hiddenEvaluation: null,
+        dueAt: addMinutes(SIM_START_ISO, 200 * 60),
         released: false,
       }),
     ],
@@ -235,6 +274,17 @@ export function createInitialState(input: { playerName: string; difficulty: Diff
     runs: [],
     scheduledRunKeys: [],
     llmTokensUsed: 0,
+    consent: input.consent ?? {
+      practiceTelemetry: true,
+      integritySignals: true,
+      retentionDays: RETENTION_DAYS,
+      notice: CONSENT_NOTICE,
+    },
+    cohort: { active: false, completed: false },
+    lastQueryFailed: false,
+    pressureOpen: false,
+    scenarioVersion: SCENARIO_VERSION,
+    seed: SEED_LABEL,
   };
 }
 
@@ -358,6 +408,16 @@ function finishExplore(state: SessionState, effects: Effect[]) {
     : "You've queried `raw_orders` and `raw_events`. MO-1 is done. The definition ticket is the one that matters next.";
   ticket.lastVerdict = { passed: true, summary, atSim: state.simNow };
   bump(state, effects, "priya", late ? 2 : 4, late ? "explore late" : "explore on time");
+  effects.push({
+    type: "telemetry",
+    name: "deadline_event",
+    payload: {
+      ticketId: "explore",
+      outcome: late ? "late" : "on_time",
+      leadMs: Date.parse(ticket.dueAt) - Date.parse(state.simNow),
+      dueAt: ticket.dueAt,
+    },
+  });
   effects.push({ type: "telemetry", name: "deliverable_submitted", payload: { ticketId: "explore", passed: true } });
   effects.push({ type: "telemetry", name: "verdict", payload: { ticketId: "explore", passed: true } });
   speak(state, effects, { persona: "priya", channel: "dm:priya", intent: "verdict_explore", body: summary });
@@ -367,7 +427,7 @@ function maybeComplete(state: SessionState, effects: Effect[]) {
   if (state.projectCompleted || state.abandoned) return;
   if (!state.breakFixed || !state.handoff?.passed) return;
   state.projectCompleted = true;
-  const summary = `${state.playerName}, that's the project. The orders table, the daily pipeline, and the late file are in a place I can defend. Standing sits with me at ${state.standing.priya}, Jonah at ${state.standing.jonah}, Sam at ${state.standing.sam}, Riley at ${state.standing.riley}. Next up in commerce is ${NEXT_PROJECT.title}. It isn't staffed yet — say the word and I'll hold your place.`;
+  const summary = `${state.playerName}, that's the project. The orders table, the daily pipeline, and the late file are in a place I can defend. Standing sits with me at ${state.standing.priya}, Jonah at ${state.standing.jonah}, Sam at ${state.standing.sam}, Riley at ${state.standing.riley}. Next up in commerce is ${NEXT_PROJECT.title}. Say the word and I'll put RC-1 on this same board. The rest of that brief is not staffed.`;
   state.review = {
     summary,
     handoffScore: state.handoff.score,
@@ -472,14 +532,30 @@ function applyTimeTriggers(state: SessionState, effects: Effect[]) {
     once(state, "break")
   ) {
     state.breakStatus = "active";
+    state.pressureOpen = true;
     release(state, effects, "break");
-    effects.push({ type: "inject_break" });
+    effects.push({ type: "inject_break", kind: "late_data" });
+    effects.push({ type: "inject_break", kind: "schema_drift" });
+    effects.push({ type: "inject_break", kind: "null_spike" });
     effects.push({ type: "telemetry", name: "break_detected", payload: { kind: "late_data" } });
+    effects.push({ type: "telemetry", name: "break_detected", payload: { kind: "schema_drift" } });
+    effects.push({ type: "telemetry", name: "break_detected", payload: { kind: "null_spike" } });
+    effects.push({
+      type: "telemetry",
+      name: "pressure_window_start",
+      payload: { trigger: "injected_break", kinds: ["late_data", "schema_drift", "null_spike"] },
+    });
     speak(state, effects, {
       persona: "riley",
       channel: "dm:riley",
       intent: "break_ping",
       body: "Something's off on the exec chart. It still looks like the pre-drop numbers, and finance already has refunds from this morning that I don't. A late file may have hit the landing zone after your run. Can you look? I can't fix `daily_revenue` from here.",
+    });
+    speak(state, effects, {
+      persona: "jonah",
+      channel: "dm:jonah",
+      intent: "break_schema",
+      body: "Heads up from the landing zone. `raw_orders` grew a `promo_code` column, and the same drop has a null spike: rows whose `amount_cents` is null. I won't rewrite the pipeline. Don't trust column order.",
     });
     speak(state, effects, {
       persona: "priya",
@@ -595,6 +671,16 @@ function applyVerdict(
   else ticket.status = "in_progress";
   effects.push({
     type: "telemetry",
+    name: "deadline_event",
+    payload: {
+      ticketId,
+      outcome: late ? "late" : "on_time",
+      leadMs: Date.parse(ticket.dueAt) - Date.parse(state.simNow),
+      dueAt: ticket.dueAt,
+    },
+  });
+  effects.push({
+    type: "telemetry",
     name: "deliverable_submitted",
     payload: { ticketId, passed: grade.passed, late },
   });
@@ -605,14 +691,36 @@ function applyVerdict(
   return { late };
 }
 
+function notePriority(state: SessionState, effects: Effect[], chosenId: string) {
+  const competing = state.tickets
+    .filter((ticket) => ticket.released && ticket.status !== "done" && ticket.id !== chosenId)
+    .map((ticket) => ticket.id);
+  if (competing.length === 0) return;
+  effects.push({
+    type: "telemetry",
+    name: "priority_decision",
+    payload: { chosen: chosenId, competing },
+  });
+}
+
 export function reduce(input: SessionState, event: DirectorEvent): ReduceResult {
   const state = structuredClone(input);
   const effects: Effect[] = [];
   if (state.abandoned && event.type !== "start") {
     return { state, effects, error: "This project was abandoned." };
   }
-  if (state.projectCompleted && !["choose_next", "player_message", "tick", "activity"].includes(event.type)) {
-    if (event.type !== "query" && event.type !== "open_ticket") {
+  if (state.projectCompleted) {
+    const allowed = new Set<DirectorEvent["type"]>([
+      "choose_next",
+      "player_message",
+      "tick",
+      "activity",
+      "query",
+      "open_ticket",
+    ]);
+    const cohortSubmit =
+      event.type === "submit" && event.ticketId === "cohort" && state.cohort.active && !state.cohort.completed;
+    if (!cohortSubmit && !allowed.has(event.type)) {
       return { state, effects, error: "The project is already in review." };
     }
   }
@@ -620,7 +728,21 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
   switch (event.type) {
     case "start": {
       state.onboarding.welcome = true;
-      effects.push({ type: "telemetry", name: "project_started", payload: { difficulty: state.difficulty } });
+      effects.push({
+        type: "telemetry",
+        name: "project_started",
+        payload: { difficulty: state.difficulty, scenarioVersion: state.scenarioVersion, seed: state.seed },
+      });
+      effects.push({
+        type: "telemetry",
+        name: "consent_recorded",
+        payload: {
+          practiceTelemetry: state.consent.practiceTelemetry,
+          integritySignals: state.consent.integritySignals,
+          retentionDays: state.consent.retentionDays,
+          notice: state.consent.notice,
+        },
+      });
       speak(state, effects, {
         persona: "priya",
         channel: "dm:priya",
@@ -669,6 +791,69 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
         name: "chat_message_sent",
         payload: { author: "player", channel: event.channel, kind },
       });
+      effects.push({
+        type: "telemetry",
+        name: "message_sent",
+        payload: {
+          channel: event.channel,
+          length: body.length,
+          messageId: `m${state.seq}`,
+          wallLatencyMs: event.wallLatencyMs ?? null,
+          toneFeatures: null,
+        },
+      });
+      const persona = personaFor(event.channel, body);
+      if (isEscalation(body)) {
+        const from = state.lastQueryAtSim ?? state.kickoffAtSim ?? state.simNow;
+        effects.push({
+          type: "telemetry",
+          name: "escalation",
+          payload: {
+            persona: persona ?? "priya",
+            why: "player_asked_for_help",
+            stuckSimMinutes: Math.max(0, minutesBetween(from, state.simNow)),
+            messageId: `m${state.seq}`,
+          },
+        });
+      }
+      if (kind === "suggestion") {
+        effects.push({
+          type: "telemetry",
+          name: "suggestion_made",
+          payload: {
+            messageId: `m${state.seq}`,
+            contentHash: contentHash(body),
+            accepted: state.statusCredits < 4,
+            persona: "priya",
+          },
+        });
+      }
+      if (isImprovementBeyondScope(body)) {
+        effects.push({
+          type: "telemetry",
+          name: "improvement_beyond_scope",
+          payload: {
+            messageId: `m${state.seq}`,
+            contentHash: contentHash(body),
+            accepted: false,
+          },
+        });
+      }
+      if (kind === "status" && isDelayFlag(body)) {
+        const active = state.tickets.find((ticket) => ticket.released && ticket.status !== "done");
+        if (active && Date.parse(state.simNow) < Date.parse(active.dueAt)) {
+          effects.push({
+            type: "telemetry",
+            name: "deadline_event",
+            payload: {
+              ticketId: active.id,
+              outcome: "flagged_early",
+              leadMs: Date.parse(active.dueAt) - Date.parse(state.simNow),
+              dueAt: active.dueAt,
+            },
+          });
+        }
+      }
       if (isOrderDefinitionQuestion(body) && !state.hidden.orderDefinitionUnlocked) {
         state.hidden.orderDefinitionUnlocked = true;
         const definition = findTicket(state, "definition");
@@ -678,7 +863,15 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
           definition.lastVerdict = { passed: true, summary: ORDER_DEFINITION, atSim: state.simNow };
         }
         release(state, effects, "clean");
-        effects.push({ type: "telemetry", name: "clarifying_question_asked", payload: { intent: "order_definition" } });
+        const clarifying = {
+          persona: event.channel.startsWith("dm:") ? event.channel.slice(3) : "priya",
+          ticketId: "definition",
+          beforeFirstQuery: state.lastQueryAtSim == null,
+          hiddenIntentUnlocked: true,
+          messageId: `m${state.seq}`,
+        };
+        effects.push({ type: "telemetry", name: "clarifying_question_asked", payload: clarifying });
+        effects.push({ type: "telemetry", name: "clarifying_question", payload: clarifying });
         effects.push({ type: "telemetry", name: "verdict", payload: { ticketId: "definition", passed: true } });
         bump(state, effects, "priya", 3, "clarified the order definition");
         const channel = event.channel.startsWith("dm:") ? event.channel : "dm:priya";
@@ -704,11 +897,33 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
       for (const table of event.tables) {
         if (!state.queriedTables.includes(table)) state.queriedTables.push(table);
       }
+      const followsError = state.lastQueryFailed;
       effects.push({
         type: "telemetry",
         name: "query_run",
-        payload: { ok: event.ok, tables: event.tables },
+        payload: {
+          ok: event.ok,
+          tables: event.tables,
+          sqlHash: event.signal?.sqlHash ?? null,
+          durationMs: event.signal?.durationMs ?? null,
+          rowsReturned: event.signal?.rowsReturned ?? null,
+          rowsScannedEstimate: event.signal?.rowsScannedEstimate ?? null,
+          errorClass: event.signal?.errorClass ?? (event.ok ? null : "engine"),
+          engine: event.signal?.engine ?? "postgres",
+          followsError: event.signal?.followsError ?? followsError,
+          profiling: event.signal?.profiling ?? false,
+          truncated: event.signal?.truncated ?? false,
+          capApplied: event.signal?.capApplied ?? false,
+        },
       });
+      if (event.signal?.profiling) {
+        effects.push({
+          type: "telemetry",
+          name: "schema_explored",
+          payload: { kind: "profiling_query", tables: event.tables, sqlHash: event.signal.sqlHash },
+        });
+      }
+      state.lastQueryFailed = !event.ok;
       if (!event.ok) {
         effects.push({
           type: "telemetry",
@@ -725,6 +940,7 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
       const ticket = findTicket(state, event.ticketId);
       if (!ticket?.released) return { state: input, effects: [], error: "That ticket isn't on the board yet." };
       if (ticket.status === "ready") ticket.status = "in_progress";
+      notePriority(state, effects, ticket.id);
       if (once(state, `opened:${ticket.id}`)) {
         effects.push({ type: "telemetry", name: "ticket_opened", payload: { ticketId: ticket.id } });
       }
@@ -732,6 +948,8 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
     }
     case "submit": {
       leaveReceive(state);
+      const submitted = findTicket(state, event.ticketId);
+      if (submitted?.released) notePriority(state, effects, submitted.id);
       if (event.ticketId === "definition") {
         return { state: input, effects: [], error: "Ask Priya what counts as an order. This ticket isn't a table." };
       }
@@ -799,6 +1017,20 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
         }
         break;
       }
+      if (event.ticketId === "cohort") {
+        if (!state.cohort.active) return { state: input, effects: [], error: "Repeat purchase cohorts isn't on the board yet." };
+        const verdict = applyVerdict(
+          state,
+          effects,
+          "cohort",
+          event.grade,
+          "priya",
+          "`repeat_cohorts` matches `clean_orders`. That's the whole stub sprint.",
+        );
+        if ("error" in verdict && verdict.error) return { state: input, effects: [], error: verdict.error };
+        if (event.grade.passed) state.cohort.completed = true;
+        break;
+      }
       if (event.ticketId === "break") {
         if (state.breakStatus === "pending") {
           return { state: input, effects: [], error: "Nothing has broken yet." };
@@ -815,6 +1047,14 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
         if (event.grade.passed) {
           state.breakFixed = true;
           state.breakStatus = "fixed";
+          if (state.pressureOpen) {
+            state.pressureOpen = false;
+            effects.push({
+              type: "telemetry",
+              name: "pressure_window_end",
+              payload: { trigger: "injected_break", recovered: true },
+            });
+          }
           const breakTicket = findTicket(state, "break");
           if (breakTicket && !state.handoff?.passed) {
             breakTicket.status = "in_progress";
@@ -923,13 +1163,18 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
     case "choose_next": {
       if (!state.projectCompleted) return { state: input, effects: [], error: "Finish this project first." };
       if (event.projectId !== NEXT_PROJECT.id) return { state: input, effects: [], error: "That project isn't offered." };
+      if (state.cohort.active) return { state: input, effects: [], error: "Repeat purchase cohorts is already on the board." };
       state.nextProjectChosen = event.projectId;
+      state.cohort.active = true;
+      const cohort = findTicket(state, "cohort");
+      if (cohort) cohort.dueAt = addMinutes(state.simNow, 8 * 60);
+      release(state, effects, "cohort");
       effects.push({ type: "telemetry", name: "next_project_chosen", payload: { projectId: event.projectId } });
       speak(state, effects, {
         persona: "priya",
         channel: "dm:priya",
         intent: "next_project",
-        body: `I'll hold ${NEXT_PROJECT.title} for you. It isn't staffed in this release, so there's no second board yet. Your standing stays where it is.`,
+        body: `Repeat purchase cohorts is a short sprint on this same database, not a new company. RC-1 is on the board: build \`repeat_cohorts\` from \`clean_orders\`. One row per customer, \`order_count\`, and \`repeat_buyer\` when that count is at least 2. The rest of the brief is not staffed. Standing carries.`,
       });
       break;
     }

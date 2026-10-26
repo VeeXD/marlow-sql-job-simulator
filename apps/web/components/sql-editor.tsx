@@ -13,10 +13,14 @@ export function SqlEditor({
   value,
   onChange,
   height = "240px",
+  onPasteChars,
+  onType,
 }: {
   value: string;
   onChange: (value: string) => void;
   height?: string;
+  onPasteChars?: (chars: number) => void;
+  onType?: () => void;
 }) {
   return (
     <div className="overflow-hidden rounded-md border border-navy/20" style={{ height }}>
@@ -26,6 +30,13 @@ export function SqlEditor({
         theme="vs-dark"
         value={value}
         onChange={(next) => onChange(next ?? "")}
+        onMount={(editor) => {
+          editor.onDidPaste((event) => {
+            const pasted = editor.getModel()?.getValueInRange(event.range) ?? "";
+            onPasteChars?.(pasted.length);
+          });
+          editor.onKeyDown(() => onType?.());
+        }}
         options={{
           minimap: { enabled: false },
           fontSize: 13,

@@ -50,9 +50,10 @@ npm test
 2. Read Priya's welcome. Jonah's schema walkthrough and the kickoff follow on the simulated clock (about a quarter of a real minute at the default speed).
 3. Open the ERD from any screen. Credentials live under Connections. Test connection runs `SELECT current_user`.
 4. Work the board. Tickets appear when the story releases them. MO-2 stays closed until you ask Priya, in your own words, whether refunded or cancelled orders belong in the clean table.
-5. Run SQL in the workbench. Postgres errors come back with the engine message, code, detail, hint, and position. Statements that would write the landing zone are rejected before they run. Results are capped at 500 rows. A statement timeout cancels the query.
+5. Run SQL in the workbench. Postgres errors come back with the engine message, code, detail, hint, and position. Statements that would write the landing zone are rejected before they run. Read statements are capped inside the SQL (`LIMIT` of the cap plus one, then the extra row is dropped) so Postgres does not return the rest of the result. A statement timeout cancels the query. Opening a desk requires the practice-mode notice.
 6. Build `clean_orders`, then a daily pipeline that fills `churn_features` and `daily_revenue`. Save the steps and run them. Submit a ticket for a state check: the tables, the constraints, and the rows.
-7. After a successful pipeline run, a late file lands. Rebuild and write the handoff note. Priya offers the next brief, which is recorded and not staffed in this release.
+7. After a successful pipeline run, three things land together: a late file, a new nullable `promo_code` column on `raw_orders`, and a spike of null amounts. Rebuild and write the handoff note.
+8. Priya offers Repeat purchase cohorts. Accepting it puts RC-1 on the same board: one table, `repeat_cohorts`, built from `clean_orders`. The rest of that brief is not staffed.
 
 Guided difficulty adds margin notes on tickets and shorter idle gaps before a nudge. The contract for done is the same. Standing starts at 72 with each person, moves, and can move back. It never locks chat or the database.
 
@@ -92,9 +93,11 @@ A session row holds the director state as JSON. Reads and writes take `SELECT �
 
 Each player gets `CREATE DATABASE … TEMPLATE marlow_template` and a login role with `statement_timeout` and `timezone=UTC`. Queries are split on the client side of the engine (quotes, comments, and dollar quotes respected). `SET`, `COPY`, role changes, functions, and writes to `raw_orders` / `raw_events` are rejected. Other SQL hits Postgres as written.
 
-The pipeline runner executes saved steps in order on that same role and stops at the first error. A daily schedule fires when the simulated clock crosses the chosen Pacific minute. The late-file injector runs as the admin role, once, and is idempotent on `source_file`.
+The pipeline runner executes saved steps in order on that same role and stops at the first error. A daily schedule fires when the simulated clock crosses the chosen Pacific minute. Breaks run as the admin role and are idempotent: the late file on `source_file`, then `ALTER TABLE … ADD COLUMN IF NOT EXISTS promo_code`, then a separate null-amount spike. A correct clean step still drops the null amounts, so the graded set does not change.
 
-Telemetry is inserted in Postgres on every director effect. If `POSTHOG_KEY` is set, the same events are also posted to PostHog after commit.
+Every director effect is inserted into `telemetry_events` with the session id, scenario version (`marlow-commerce-2024-06`), seed (`seed-v1`), simulated time, and wall-clock time. The same row is queryable through `GET /api/sessions/:id/telemetry`. If `POSTHOG_KEY` is set, the events are also posted to PostHog after commit. This is practice-mode evidence for a later hiring signal. It is not a score. Retention is recorded as 90 days; nothing deletes rows when that window passes. `rowsScannedEstimate` is a planner estimate from `EXPLAIN` without `ANALYZE`. Message tone features are stored as null until a later pass.
+
+In development, `/signals` groups one session's events under the six dimensions (technical knowledge, curiosity, creativity and innovation, task completion, reaction to pressure, working style and values). Each row links back to the event. The banner says the grouping is experimental. The production image sets `ALLOW_SIGNALS_PAGE=false`, and the API then returns 404.
 
 ### LLM gateway
 
@@ -128,7 +131,7 @@ There is no JSON loader in this release. A project script is the set of TypeScri
 4. **Hidden intent.** A question detector belongs in `packages/engine/src/clarify.ts`. Wire it in the `player_message` branch. The written rule is added to the ticket only after it matches. Do not put that rule in the system prompt beforehand.
 5. **Reference and grading.** The expected transform lives in `packages/engine/src/reference.ts`. `packages/engine/src/prompt.ts` and `director.ts` must not import it. State checks (table, types, constraints, row set, consumer tables) live in `packages/engine/src/grading.ts` and compare the player's tables to that reference inside a transaction that rolls back.
 6. **Handoff.** Checklist items in `packages/engine/src/handoff.ts`. This release grades the note with the checklist, not with a model.
-7. **Failure injection.** Add the rows to the seed and run them from `injectBreak` in `apps/server/src/sandbox.ts` as the admin role. The injector can grow other failure kinds later. Only the late file is called today.
+7. **Failure injection.** Add the SQL in `packages/engine/src/seed.ts` and run it from `injectBreak` in `apps/server/src/sandbox.ts` as the admin role. The director emits `inject_break` with a kind: `late_data`, `schema_drift`, or `null_spike`.
 8. **Prove it.** Extend `packages/engine/test` for the reducer and the grader. Extend `apps/server/test/happy-path.e2e.ts` so a scripted player can finish the project with the mock provider. Run `npm run probe` after any prompt or fallback change.
 
 Fallback lines should say what is true in the timeline using the same phrases G4 checks (`finished` / `not finished` plus the fact's noun). Mark schema names with backticks.
@@ -144,14 +147,17 @@ See `.env.example`. Defaults are enough for local Postgres on 5432 and Redis on 
 ## Release 1 limits
 
 - Auth is the display name plus a bearer token stored in the browser. There is no Clerk or Auth.js.
-- PostHog is optional. Events are always stored in Postgres.
+- Practice mode only. There is no candidate mode and no employer report. The signals page must not be treated as a hiring score.
+- PostHog is optional. Events are always stored in Postgres. The 90-day retention flag is recorded and not enforced.
 - The handoff is a checklist, not a model review.
-- One injected failure is wired: a late file. The injector is a single function you can extend.
+- Three injected breaks fire together: late file, schema drift (`promo_code`), and a null-amount spike. They are idempotent and do not change the canonical clean set.
+- Repeat purchase cohorts is a short stub on the same database (RC-1 only). There is no second company and no third project.
 - MySQL and DuckDB adapters throw. Only Postgres runs.
 - G2's "near complete" score and G4's phrase check are heuristics. The probe suite states that.
-- The row cap slices the result after Postgres returns it. It does not push a `LIMIT` into the SQL.
-- The next project, Repeat purchase cohorts, is a stub. Choosing it records the offer and does not open a second world.
+- `rowsScannedEstimate` is a planner estimate, not rows actually read. Tone features on messages are null.
 - The week view does not cost simulated time.
-- Standard difficulty uses the same ticket bodies as Guided and drops the margin notes.
-- Sandboxes for finished or abandoned sessions are eligible to be dropped after 7 days, during the worker's morning pass.
+- Standard tickets are shorter than Guided and have no margin notes. The evaluation rule and the pipeline column contract are still on the ticket.
+- Sandboxes for finished or abandoned sessions are eligible to be dropped after 7 days, during the worker's morning pass. Session telemetry is not deleted on that pass.
 - The workplace is functional. Visual polish is later.
+
+`docker compose up --build` waits for Postgres, runs migrations, and builds `marlow_template` on boot. The app healthcheck allows 90 seconds before it starts failing. This image turns the signals page off.

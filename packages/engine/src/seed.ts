@@ -2,6 +2,8 @@ import { formatLocalTimestamp } from "./clock.js";
 
 export const SEED_VERSION = 1;
 export const LATE_SOURCE_FILE = "orders_2024_06_late.csv";
+export const DRIFT_SOURCE_FILE = "orders_2024_06_drift.csv";
+export const NULL_SPIKE_SOURCE_FILE = "orders_2024_06_null_spike.csv";
 
 export type SeedManifest = {
   logicalOrders: number;
@@ -438,6 +440,39 @@ export function buildWorldSeed(): WorldSeed {
     ].join("\n"),
     manifest,
   };
+}
+
+const ORDER_COLS =
+  "order_id, customer_id, ordered_at, ordered_at_local, order_status, amount_cents, currency, source_file, loaded_at";
+
+/** New nullable column plus rows a correct clean step still drops. Idempotent. */
+export function schemaDriftSql(): string {
+  return `
+ALTER TABLE raw_orders ADD COLUMN IF NOT EXISTS promo_code text;
+INSERT INTO raw_orders (${ORDER_COLS}, promo_code)
+SELECT 'o92001', 'c001', '2024-06-04T18:00:00.000Z'::timestamptz, NULL, 'paid', NULL::integer, 'USD', '${DRIFT_SOURCE_FILE}', '2024-06-05T17:05:00.000Z'::timestamptz, 'WELCOME'
+WHERE NOT EXISTS (SELECT 1 FROM raw_orders WHERE source_file = '${DRIFT_SOURCE_FILE}');
+INSERT INTO raw_orders (${ORDER_COLS}, promo_code)
+SELECT 'o92002', 'c002', '2024-06-04T18:10:00.000Z'::timestamptz, NULL, 'paid', NULL::integer, 'USD', '${DRIFT_SOURCE_FILE}', '2024-06-05T17:05:00.000Z'::timestamptz, 'WELCOME'
+WHERE NOT EXISTS (SELECT 1 FROM raw_orders WHERE order_id = 'o92002' AND source_file = '${DRIFT_SOURCE_FILE}');
+`.trim();
+}
+
+/** Extra null amounts, separate from the late file. A correct clean step excludes them. */
+export function nullSpikeSql(): string {
+  const values = [1, 2, 3, 4, 5, 6]
+    .map(
+      (n) =>
+        `('o93${String(n).padStart(3, "0")}', 'c${String(n).padStart(3, "0")}', '2024-06-04T21:0${n}:00.000Z'::timestamptz, NULL, 'paid', NULL::integer, 'USD', '${NULL_SPIKE_SOURCE_FILE}', '2024-06-05T17:06:00.000Z'::timestamptz)`,
+    )
+    .join(",\n");
+  return `
+INSERT INTO raw_orders (${ORDER_COLS})
+SELECT * FROM (VALUES
+${values}
+) AS spike(${ORDER_COLS})
+WHERE NOT EXISTS (SELECT 1 FROM raw_orders WHERE source_file = '${NULL_SPIKE_SOURCE_FILE}');
+`.trim();
 }
 
 let cached: WorldSeed | null = null;

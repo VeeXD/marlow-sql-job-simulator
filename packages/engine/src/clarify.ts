@@ -18,3 +18,7 @@ export function isStatusUpdate(text: string): boolean {
 export function isSuggestion(text: string): boolean {
   return /suggest|we should|what if we|could we/.test(text.toLowerCase());
 }
+
+export function isDelayFlag(text: string): boolean {
+  return /running late|delay|i(?:'ll| will) be late|pushed the|might miss|won't make the due/.test(text.toLowerCase());
+}

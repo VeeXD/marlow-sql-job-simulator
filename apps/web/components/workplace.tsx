@@ -61,6 +61,57 @@ export function Workplace() {
   const [connOpen, setConnOpen] = useState(false);
   const [ticket, setTicket] = useState<Ticket | null>(null);
   const [leaveOpen, setLeaveOpen] = useState(false);
+  const keyTimes = useRef<number[]>([]);
+
+  const postSignal = useCallback((body: Record<string, unknown>) => {
+    const current = stored.current;
+    if (!current) return;
+    void api(`/api/sessions/${current.id}/signals`, current.token, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }).catch(() => undefined);
+  }, []);
+
+  const flushCadence = useCallback(() => {
+    const stamps = keyTimes.current;
+    keyTimes.current = [];
+    if (!sessionRef.current?.consent.integritySignals || stamps.length < 2) return;
+    const intervals: number[] = [];
+    for (let i = 1; i < stamps.length; i++) intervals.push(stamps[i] - stamps[i - 1]);
+    intervals.sort((a, b) => a - b);
+    const medianIntervalMs = intervals[Math.floor(intervals.length / 2)] ?? 0;
+    postSignal({ kind: "typing_cadence", keyCount: stamps.length, medianIntervalMs });
+  }, [postSignal]);
+
+  const noteKey = useCallback(() => {
+    if (!sessionRef.current?.consent.integritySignals) return;
+    keyTimes.current.push(Date.now());
+    if (keyTimes.current.length >= 24) flushCadence();
+  }, [flushCadence]);
+
+  const notePaste = useCallback(
+    (chars: number) => {
+      if (!sessionRef.current?.consent.integritySignals) return;
+      postSignal({ kind: "paste", pasteChars: chars });
+    },
+    [postSignal],
+  );
+
+  useEffect(() => {
+    if (!session?.consent.integritySignals) return;
+    const onHide = () => {
+      if (document.visibilityState !== "hidden") return;
+      flushCadence();
+      postSignal({ kind: "focus_loss" });
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => document.removeEventListener("visibilitychange", onHide);
+  }, [session?.consent.integritySignals, flushCadence, postSignal]);
+
+  useEffect(() => {
+    if (!erdOpen) return;
+    postSignal({ kind: "erd_opened" });
+  }, [erdOpen, postSignal]);
 
   const commit = useCallback((mine: number, next: Session) => {
     if (mine === gen.current) setSession(next);
@@ -299,6 +350,9 @@ export function Workplace() {
               setSql={setSql}
               running={running}
               result={result}
+              notice={session.consent.integritySignals ? session.consent.notice : null}
+              onPasteChars={notePaste}
+              onType={noteKey}
               onRun={async () => {
                 setRunning(true);
                 try {
@@ -321,6 +375,8 @@ export function Workplace() {
             <PipelinePane
               session={session}
               onError={setBanner}
+              onPasteChars={notePaste}
+              onType={noteKey}
               onSession={(mine, next) => commit(mine, next)}
               save={(steps, schedule) =>
                 mutate<Session>(`/api/sessions/${session.id}/pipeline`, {
@@ -337,15 +393,27 @@ export function Workplace() {
           </TabsContent>
         </Tabs>
 
-        <footer className="flex items-center justify-between border-t border-line px-3 py-1.5 text-[11px] text-muted">
+        <footer className="flex items-center justify-between gap-3 border-t border-line px-3 py-1.5 text-[11px] text-muted">
           <span>Standing can fall and recover. It never locks a person or a table.</span>
-          <button className="underline" onClick={() => setLeaveOpen(true)}>
-            Leave the project
-          </button>
+          <span className="flex items-center gap-3">
+            {session.signalsPage ? (
+              <Link href="/signals" className="underline">
+                Signals
+              </Link>
+            ) : null}
+            <button className="underline" onClick={() => setLeaveOpen(true)}>
+              Leave the project
+            </button>
+          </span>
         </footer>
       </div>
 
-      <ErdDialog open={erdOpen} onOpenChange={setErdOpen} session={session} />
+      <ErdDialog
+        open={erdOpen}
+        onOpenChange={setErdOpen}
+        session={session}
+        onPreview={(table) => postSignal({ kind: "table_previewed", table })}
+      />
       <ConnectionDialog open={connOpen} onOpenChange={setConnOpen} session={session} />
       <TicketDialog
         ticket={ticket}
@@ -445,6 +513,16 @@ function Board({ session, onOpen }: { session: Session; onOpen: (ticket: Ticket)
         <h2 className="font-serif text-2xl">{session.project.title}</h2>
         <p className="mt-1 max-w-3xl text-sm text-muted">{session.project.summary}</p>
       </section>
+      {session.cohort?.active ? (
+        <section className="rounded-lg border border-pine/40 bg-[#eef4f1] p-4">
+          <p className="text-xs uppercase tracking-wide text-pine">Repeat purchase cohorts</p>
+          <p className="mt-1 text-sm">
+            {session.cohort.completed
+              ? "RC-1 is done. The rest of that brief is not staffed."
+              : "RC-1 is on this board. Build repeat_cohorts from clean_orders, then submit it."}
+          </p>
+        </section>
+      ) : null}
       {session.review ? <ReviewCard session={session} /> : null}
       {session.tickets.length === 0 ? (
         <p className="rounded-lg border border-dashed border-line bg-card p-6 text-sm text-muted">
@@ -500,7 +578,13 @@ function ReviewCard({ session }: { session: Session }) {
       <Prose text={review.summary} className="mt-2 text-sm leading-relaxed" />
       <p className="mt-2 text-xs text-muted">
         Handoff checklist {review.handoffScore}/{review.handoffTotal}.
-        {session.nextProjectChosen ? " Next brief recorded." : " The next brief can be accepted from MO-5."}
+        {session.cohort?.completed
+          ? " RC-1 is done. The wider brief stays unstaffed."
+          : session.cohort?.active
+            ? " RC-1 is on the board."
+            : session.nextProjectChosen
+              ? " Next brief recorded."
+              : " The next brief can be accepted from MO-5."}
       </p>
     </section>
   );
@@ -512,12 +596,18 @@ function Workbench({
   running,
   result,
   onRun,
+  notice,
+  onPasteChars,
+  onType,
 }: {
   sql: string;
   setSql: (value: string) => void;
   running: boolean;
   result: QueryResult | null;
   onRun: () => void;
+  notice: string | null;
+  onPasteChars: (chars: number) => void;
+  onType: () => void;
 }) {
   return (
     <div className="space-y-3">
@@ -525,13 +615,14 @@ function Workbench({
         <div>
           <h2 className="font-serif text-2xl">Workbench</h2>
           <p className="text-sm text-muted">Your writable database. Landing tables are read-only. Engine errors are unchanged.</p>
+          {notice ? <p className="mt-1 max-w-xl text-xs text-muted">{notice}</p> : null}
         </div>
         <Button onClick={onRun} disabled={running || sql.trim().length === 0}>
           <Play className="h-3.5 w-3.5" />
           {running ? "Running…" : "Run"}
         </Button>
       </div>
-      <SqlEditor value={sql} onChange={setSql} height="260px" />
+      <SqlEditor value={sql} onChange={setSql} height="260px" onPasteChars={onPasteChars} onType={onType} />
       {!result ? (
         <p className="rounded-lg border border-dashed border-line bg-card p-4 text-sm text-muted">
           Run a statement to see rows. A missing table comes back as Postgres wrote it, including the error code.
@@ -602,8 +693,12 @@ function PipelinePane({
   run,
   onSession,
   onError,
+  onPasteChars,
+  onType,
 }: {
   session: Session;
+  onPasteChars: (chars: number) => void;
+  onType: () => void;
   save: (
     steps: { id?: string; name: string; sql: string }[],
     schedule: Session["pipeline"]["schedule"],
@@ -752,6 +847,8 @@ function PipelinePane({
                 setSteps((prev) => prev.map((step, index) => (index === selected ? { ...step, sql: value } : step)))
               }
               height="220px"
+              onPasteChars={onPasteChars}
+              onType={onType}
             />
           </div>
         ) : null}
@@ -841,10 +938,12 @@ function ErdDialog({
   open,
   onOpenChange,
   session,
+  onPreview,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   session: Session;
+  onPreview: (table: string) => void;
 }) {
   const [schema, setSchema] = useState<SchemaPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -884,7 +983,9 @@ function ErdDialog({
           {(schema?.catalog ?? []).map((table) => (
             <section key={table.table} className="rounded-md border border-line p-3">
               <h3 className="flex items-center justify-between font-mono text-sm">
-                {table.table}
+                <button type="button" className="underline-offset-2 hover:underline" onClick={() => onPreview(table.table)}>
+                  {table.table}
+                </button>
                 <Badge variant={live.has(table.table) ? "done" : "outline"}>{live.has(table.table) ? "in database" : "not created"}</Badge>
               </h3>
               <ul className="mt-2 space-y-0.5 font-mono text-xs text-muted">
@@ -1121,7 +1222,7 @@ function TicketDialog({
                     }
                   }}
                 >
-                  {session.nextProjectChosen ? "Place held" : "Take the next brief"}
+                  {session.nextProjectChosen ? "RC-1 is on the board" : "Put RC-1 on the board"}
                 </Button>
               </section>
             ) : null}

@@ -72,6 +72,7 @@ export const SCHEMA_CATALOG: SchemaTable[] = [
       "currency",
       "source_file",
       "loaded_at",
+      "promo_code",
     ],
   },
   {
@@ -98,6 +99,10 @@ export const SCHEMA_CATALOG: SchemaTable[] = [
   {
     table: "daily_revenue",
     columns: ["revenue_date", "order_count", "gross_revenue", "aov"],
+  },
+  {
+    table: "repeat_cohorts",
+    columns: ["customer_id", "order_count", "repeat_buyer"],
   },
 ];
 
@@ -158,7 +163,7 @@ export const NEXT_PROJECT = {
   id: "repeat-purchase-cohorts",
   title: "Repeat purchase cohorts",
   summary:
-    "Next up in commerce: which customers come back, and after how many days. The brief isn't staffed in this release. Choosing it holds your place; standing would carry.",
+    "A short sprint on the same database: build repeat_cohorts from clean_orders. The wider cohort brief is not staffed past that one table.",
   status: "stub" as const,
 };
 

@@ -3,6 +3,68 @@
 ## Summary
 A simulated data job. The player joins a data team at a fictional company and lives through a whole **project**: pulling and cleaning data, building a pipeline that feeds the ML and data-viz teams, keeping it running when it breaks, and communicating throughout with a manager and teammates. SQL is the tool, not the product. Release 1 proves that one full project, end to end, holds attention and leaves the player confident enough to want the next one.
 
+**Long-term:** the same simulated work becomes a trusted, evidence-linked hiring signal across six dimensions (technical knowledge, curiosity, creativity & innovation, task completion, reaction to pressure, working-style & values alignment). See the North star section. It is experimental until validated.
+
+## North star: a trusted hiring signal
+**Ultimate goal:** the simulator becomes a trusted behavioural assessment of how a person actually works. Much as some large companies use LeetCode-style rounds, employers should be able to rely on its rankings and reports. The difference is that it measures how someone does a job, not only whether they can solve puzzles. This is a long-term goal. It does not change the Release 1 or Release 2 build except for telemetry, and no report should be used for hiring until the validation described below is done.
+
+### Six dimensions, each tied to observable signals
+Every score is **evidence-linked**: each score in a report cites the specific events that produced it (ticket, timestamp, message or query). There are no free-floating opinions.
+
+| Dimension | Observable signals in the sim |
+|---|---|
+| Technical knowledge | State-grading results (tables, constraints, no duplicates, consumer queries); error→fix recovery time; query efficiency (runtime and rows scanned vs. reference); dialect handling; seed traps avoided |
+| Curiosity | Clarifying questions asked before the first query; schema/ERD exploration (tables profiled, `COUNT`/`DISTINCT` checks); hidden intent unlocked; questions about downstream consumers |
+| Creativity & innovation | Suggestions made to the manager or team; alternative approaches considered; improvements beyond the ticket (tests, constraints, monitoring); quality of proposed fixes |
+| Ability to complete tasks | Milestones on time; attempts per deliverable; project completion; handoff note quality; delays flagged early vs. silently missed |
+| Reaction to pressure & peak deadlines | Change from baseline after an injected break or deadline compression: error rate, time to recover, quality of communication under time pressure, prioritisation and triage choices |
+| Working-style & values alignment *(replaces "culture fit"; see Risks)* | Communication style, escalation choices and priority trade-offs, compared with an **explicit, job-related, employer-declared** profile. Always goes to human review |
+
+### Preferring deterministic signals over model opinions
+- Deterministic signals (state checks, timings, counts, event sequences) carry the most weight.
+- Where an LLM judge is needed (suggestion quality, communication), it uses rubric-anchored scoring with example answers per score level. Several judges score independently, and their agreement is measured; disagreement sends the item to human review.
+- Judge prompts are versioned and calibrated against human-rated sets.
+
+### Product shape
+- **Practice mode** (R1–R3): the current product. Scores are private to the player and used for feedback only.
+- **Candidate mode** (R4): proctored, fixed scenario versions (seeded variants of equal difficulty), time-boxed, with explicit consent, and accommodations available.
+- **Employer mode** (R4): company profile setup (role, level, declared job-related working-style criteria and dimension weights); candidate reports with evidence links; ranking **only within comparable groups of candidates** (same scenario version, level and accommodations). Reports go to a human reviewer and never auto-reject.
+
+### Integrity
+- **Cheating risks:** LLM assistance, shared answers and impersonation.
+- **Mitigations:** scenario variants generated from seeds (different numbers, names and traps); proctoring signals (paste events, tab focus, typing cadence) recorded as signals rather than automatic verdicts; behavioural consistency checks (sudden expert-level output after lots of struggle, or answers matching another variant); an optional short live follow-up.
+
+### Validity path (psychometrics) before any hiring use
+1. **Reliability:** test-retest on the same person, and consistency across scenarios on parallel variants.
+2. **Construct validity:** each dimension correlates with established measures and is distinct from the others (for example, curiosity is not just speed).
+3. **Predictive validity:** pilot employer partners share on-the-job performance data, and we correlate it with scores.
+4. **Norming:** build reference distributions per role and level.
+5. **Adverse-impact analysis** across protected groups before any employer use.
+
+Until this is done, every report is labelled **"Experimental — not validated; must not be the sole basis of any hiring decision."**
+Estimate: a credible validity study needs hundreds of assessed candidates and 6 to 12+ months of outcome data (estimate).
+
+### Telemetry the R1 event schema must capture now
+The R1 telemetry is the foundation, and these signals can't be recovered after the fact. Every event needs a session ID, a scenario version and seed, a sim timestamp and a wall-clock timestamp. Add these:
+- `query_run`: text hash, duration, rows scanned and returned, error class, connection/engine, whether it follows an error (recovery chain)
+- `schema_explored`: ERD opened, table previewed, profiling query detected
+- `clarifying_question`: target persona, ticket, before or after the first query, hidden-intent unlocked flag
+- `suggestion_made` / `improvement_beyond_scope`: content reference and whether the manager accepted it
+- `escalation`: who was contacted, why, and how long the player was stuck first
+- `priority_decision`: competing items and which one was chosen
+- `deadline_event`: on time, late, or flagged early, plus lead time
+- `pressure_window_start/end`: break injected or deadline compressed, so behaviour before and during can be compared
+- `message_sent`: length, tone features (computed later), response latency
+- Integrity signals: paste size, focus loss, typing cadence summary (practice mode collects these only with notice)
+- Consent and data-retention flags per session
+
+### Sequencing
+- **R1–R2:** no change to the build except the telemetry additions above.
+- **R3:** scoring prototypes in practice mode only, shown to players as feedback; start the reliability studies.
+- **R4:** candidate and employer modes, only after the validity study and a bias audit.
+
+Estimate: R4 adds roughly 4 to 6+ months of engineering plus the validation period, and legal review before launch.
+
 ## Who this is for
 Career switchers aiming at their first analyst / analytics-engineer / data-engineer job who can write basic SQL but freeze on real work: vague asks, unfamiliar schemas, coordination, deadlines, things breaking. Experienced track later.
 
@@ -104,7 +166,8 @@ project started, onboarding complete, ticket opened, query run, error returned, 
 ## Releases
 - **R1 — walking skeleton of a full project:** everything above. Postgres only, one world, one project (+ stub of next), one scripted ambiguous ticket.
 - **R2 — feels like a job:** MySQL transactional source with dialect differences; persistent visible standing across projects; general ambiguity mechanic; approach grading (rubric + model review); ad-hoc competing requests; second industry; 3 difficulties.
-- **R3 — later, deliberately:** warehouse (DuckDB) and vector (pgvector) storylines; calendar meetings costing time; bigger team and on-call; BYO schema; portfolio export.
+- **R3 — later, deliberately:** warehouse (DuckDB) and vector (pgvector) storylines; calendar meetings costing time; bigger team and on-call; BYO schema; portfolio export; **scoring prototypes in practice mode** (six dimensions, evidence-linked, feedback only) and reliability studies.
+- **R4 — Hiring assessment:** candidate mode (proctored, fixed seeded variants, time-boxed, consent, accommodations); employer mode (company profile config, evidence-linked reports, ranking within comparable groups of candidates, human review). Gated on the validity study and a bias audit.
 
 ## Parked scope (with reasons)
 - Real orchestrators (Airflow/dbt) — too heavy, breaks per-player sandbox model.
@@ -120,6 +183,20 @@ project started, onboarding complete, ticket opened, query run, error returned, 
 - **State-based grading** — many valid table designs; checks must test properties, not exact DDL.
 - **Infra** — writable DB per player grows storage; reap idle DBs.
 - **Timeline (estimate):** ~12–16+ weeks for one strong engineer with AI tools plus a scenario writer — larger than v1's 10–14 because of writable state, the runner and the director.
+
+- **Hiring-use legal and ethical risk (not legal advice; get counsel before R4):**
+  - **US EEOC / Title VII:** adverse-impact audits using the four-fifths rule across protected groups, run on every scoring version.
+  - **NYC Local Law 144:** automated employment decision tools need an independent bias audit within the past year, a public summary of the results, and notice to candidates.
+  - **EU AI Act:** AI used for recruitment and selection is **high-risk**. That brings risk management, data governance, logging, transparency, human oversight, and conformity obligations.
+  - **Illinois:** the AI Video Interview Act and similar state rules require notice, consent, and limits on sharing and retention. Track new state laws, such as Colorado's.
+  - **ADA:** timed and high-pressure scenarios can disadvantage some disabled candidates, so reasonable accommodations (extended time, no-pressure variants) must be offered and normed separately.
+  - **GDPR/CCPA:** explicit consent, a purpose limit, data-retention windows, and deletion and access rights.
+  - **Explainability:** candidates have a right to see their results and the evidence behind them.
+- **"Culture fit" is the highest-risk dimension.** It is a well-known proxy for discrimination. We reframe it as **working-style and values alignment** against explicit, job-related, employer-declared criteria. It never draws on demographic or style features unrelated to the job, it always gets human review, and employers can switch it off.
+- **Validity risk:** the scores may not predict job performance. Until predictive validity is shown, reports are labelled experimental and must not be the sole basis of a hiring decision.
+- **Integrity risk:** LLM-assisted or shared answers could inflate scores. Mitigations are seeded variants, proctoring signals, and consistency checks. No mitigation is perfect.
+- **LLM-judge reliability:** judges can be inconsistent or biased. We use rubric anchoring, agreement between several judges, a preference for deterministic signals, and calibration against human ratings.
+- **Trust and incentive risk:** practice-mode players may not want their practice data used for hiring. Keep the modes separate, and never feed practice data into employer reports without explicit opt-in.
 
 ## Build plan
 1. **Spikes (~2 weeks, estimate):** guardrail harness (G1–G4 on probe/adversarial sets); author project 1 script and time it; prove template-DB cloning speed.

@@ -48,6 +48,15 @@ One world (e-commerce), Postgres only, one project end to end.
 - Bigger team, competing priorities, on-call rotation.
 - Bring-your-own schema; portfolio export of completed projects; procedurally assisted project authoring.
 
+## Release 4 — Hiring assessment (gated on validity study + bias audit)
+- **01 Set up:** a candidate gets an invite from an employer, gives consent, and requests accommodations; the employer configures the role, level, dimension weights, and declared job-related working-style criteria.
+- **02–08 The work:** proctored, time-boxed, fixed seeded scenario variant; same loop as practice; integrity signals recorded (paste, focus, cadence) and consistency checks.
+- **09 Judged:** six-dimension report (technical, curiosity, creativity & innovation, completion, pressure response, working-style & values alignment). **Every score cites its events.** Deterministic signals first, LLM judges are rubric-anchored with multi-judge agreement. Labelled experimental until validated.
+- **10 Next:** the employer sees reports and ranking within comparable candidate groups, with mandatory human review; the candidate can see their own results and evidence, and request deletion.
+- `risk` Culture-fit scoring as a proxy for discrimination → reframed as working-style alignment against explicit criteria, human review.
+- `risk` Legal: EEOC four-fifths rule audits, NYC LL144 bias audit, EU AI Act high-risk, Illinois-style consent rules, ADA accommodations, GDPR/CCPA.
+- **Foundation from R1:** the telemetry event schema already captures the needed signals (see PRD). R3 adds scoring prototypes in practice mode only.
+
 ## Parked, with reasons
 - **Airflow/dbt-real orchestration** — too heavy; a step-list runner gives ~80% of the feel.
 - **Multiplayer** — doubles state complexity before the single-player loop is proven.

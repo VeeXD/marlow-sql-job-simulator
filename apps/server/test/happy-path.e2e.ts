@@ -57,9 +57,16 @@ describe("project 1 happy path", () => {
     expect(world.difficulties).toHaveLength(2);
     expect(world.project.id).toBe("trustworthy-orders");
 
+    await expect(
+      api("/api/sessions", null, {
+        method: "POST",
+        body: JSON.stringify({ playerName: "Alex Morgan", difficulty: "standard" }),
+      }),
+    ).rejects.toThrow(/400/);
+
     const created = (await api("/api/sessions", null, {
       method: "POST",
-      body: JSON.stringify({ playerName: "Alex Morgan", difficulty: "standard" }),
+      body: JSON.stringify({ playerName: "Alex Morgan", difficulty: "standard", consent: true }),
     })) as Dto;
     const token = created.token;
     expect(created.tickets).toHaveLength(0);
@@ -152,6 +159,20 @@ describe("project 1 happy path", () => {
       body: JSON.stringify({ sql: "SELECT COUNT(*)::int AS n FROM raw_orders WHERE source_file = 'orders_2024_06_late.csv'" }),
     });
     expect(Number(late.result.statements.at(-1).rows[0].n)).toBeGreaterThan(0);
+    const promo = await api(`/api/sessions/${created.id}/query`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        sql: "SELECT column_name FROM information_schema.columns WHERE table_name = 'raw_orders' AND column_name = 'promo_code'",
+      }),
+    });
+    expect(promo.result.statements.at(-1).rows).toHaveLength(1);
+    const spike = await api(`/api/sessions/${created.id}/query`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        sql: "SELECT COUNT(*)::int AS n FROM raw_orders WHERE source_file = 'orders_2024_06_null_spike.csv'",
+      }),
+    });
+    expect(Number(spike.result.statements.at(-1).rows[0].n)).toBeGreaterThan(0);
 
     await api(`/api/sessions/${created.id}/pipeline/run`, token, { method: "POST" });
     const fixed = (await api(`/api/sessions/${created.id}/tickets/break/submit`, token, { method: "POST" })) as Dto;
@@ -174,8 +195,31 @@ describe("project 1 happy path", () => {
     })) as Dto;
     expect(next.nextProjectChosen).toBe("repeat-purchase-cohorts");
     expect(next.stage).toBe("next");
+    expect(next.tickets.map((ticket) => ticket.id)).toContain("cohort");
 
-    const events = (await api(`/api/sessions/${created.id}/telemetry`, token)) as { event_name: string }[];
+    await api(`/api/sessions/${created.id}/query`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        sql: `CREATE TABLE repeat_cohorts AS
+SELECT customer_id, COUNT(*)::int AS order_count, (COUNT(*) >= 2) AS repeat_buyer
+FROM clean_orders GROUP BY customer_id;
+ALTER TABLE repeat_cohorts ADD PRIMARY KEY (customer_id);`,
+      }),
+    });
+    const cohort = (await api(`/api/sessions/${created.id}/tickets/cohort/submit`, token, { method: "POST" })) as Dto & {
+      cohort: { completed: boolean };
+    };
+    expect(cohort.tickets.find((ticket) => ticket.id === "cohort")?.status).toBe("done");
+    expect(cohort.cohort.completed).toBe(true);
+
+    const events = (await api(`/api/sessions/${created.id}/telemetry`, token)) as {
+      event_name: string;
+      scenario_version: string;
+      seed: string;
+      wall_time: string;
+      sim_time: string;
+      payload: { sqlHash?: string };
+    }[];
     const names = new Set(events.map((event) => event.event_name));
     for (const required of [
       "project_started",
@@ -194,8 +238,36 @@ describe("project 1 happy path", () => {
       "handoff_submitted",
       "project_completed",
       "next_project_chosen",
+      "consent_recorded",
+      "clarifying_question",
+      "pressure_window_start",
+      "pressure_window_end",
+      "schema_explored",
+      "message_sent",
+      "deadline_event",
     ]) {
       expect(names.has(required), required).toBe(true);
+    }
+    const queryRun = events.find((event) => event.event_name === "query_run");
+    expect(queryRun?.payload.sqlHash).toBeTruthy();
+    expect(queryRun?.scenario_version).toBe("marlow-commerce-2024-06");
+    expect(queryRun?.seed).toBe("seed-v1");
+    expect(queryRun?.wall_time).toBeTruthy();
+    expect(queryRun?.sim_time).toBeTruthy();
+
+    const grouped = (await api(`/api/sessions/${created.id}/signals`, token)) as {
+      experimental: boolean;
+      scored: boolean;
+      label: string;
+      dimensions: { id: string; eventCount: number; events: unknown[]; score?: number }[];
+    };
+    expect(grouped.experimental).toBe(true);
+    expect(grouped.scored).toBe(false);
+    expect(grouped.label).toMatch(/Experimental/);
+    expect(grouped.dimensions).toHaveLength(6);
+    for (const dimension of grouped.dimensions) {
+      expect(dimension).not.toHaveProperty("score");
+      expect(dimension.eventCount).toBe(dimension.events.length);
     }
 
     const slept = await api(`/api/sessions/${created.id}/query`, token, {

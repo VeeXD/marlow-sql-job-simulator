@@ -1,4 +1,4 @@
-import { CHURN_SELECT_FROM, CLEAN_SELECT, REVENUE_SELECT_FROM } from "./reference.js";
+import { CHURN_SELECT_FROM, CLEAN_SELECT, COHORT_SELECT, REVENUE_SELECT_FROM } from "./reference.js";
 import { failed, passed, type SqlExec } from "./sql.js";
 import type { GradeCheck, GradeResult } from "./types.js";
 
@@ -318,6 +318,51 @@ export async function gradeConsumers(exec: SqlExec): Promise<GradeResult> {
       id: "revenue_values",
       detail: revenue.ok ? "`daily_revenue` matches the contract." : `daily_revenue: ${revenue.detail}`,
     });
+  } finally {
+    await exec.query("ROLLBACK");
+  }
+  return result(checks);
+}
+
+export async function gradeRepeatCohorts(exec: SqlExec): Promise<GradeResult> {
+  const checks: GradeCheck[] = [];
+  if (!(await tableExists(exec, "repeat_cohorts"))) {
+    return result([failed("table_exists", "`repeat_cohorts` does not exist yet.")]);
+  }
+  checks.push(passed("table_exists", "`repeat_cohorts` exists."));
+  const cols = await columns(exec, "repeat_cohorts");
+  const have = new Set(cols.map((column) => column.column_name));
+  const missing = ["customer_id", "order_count", "repeat_buyer"].filter((name) => !have.has(name));
+  checks.push(
+    missing.length === 0
+      ? passed("columns", "Required columns are present.")
+      : failed("columns", `Missing columns: ${missing.map((name) => `\`${name}\``).join(", ")}.`),
+  );
+  checks.push(
+    (await uniqueOn(exec, "repeat_cohorts", "customer_id"))
+      ? passed("unique", "`customer_id` is unique on `repeat_cohorts`.")
+      : failed("unique", "`repeat_cohorts.customer_id` needs a primary key or unique constraint."),
+  );
+  if (missing.length > 0) return result(checks);
+  await exec.query("BEGIN");
+  try {
+    await exec.query("DROP TABLE IF EXISTS g2_ref_cohort");
+    await exec.query(`CREATE TEMP TABLE g2_ref_cohort AS ${COHORT_SELECT}`);
+    const compared = await compareMaps(
+      exec,
+      `SELECT customer_id::text AS customer_id, order_count::int AS order_count, repeat_buyer::boolean AS repeat_buyer FROM repeat_cohorts`,
+      `SELECT customer_id::text AS customer_id, order_count::int AS order_count, repeat_buyer::boolean AS repeat_buyer FROM g2_ref_cohort`,
+      "customer_id",
+      [
+        { name: "order_count", numeric: true },
+        { name: "repeat_buyer", numeric: false },
+      ],
+    );
+    checks.push(
+      compared.ok
+        ? passed("rows", "`repeat_cohorts` matches one row per customer in `clean_orders`.")
+        : failed("rows", compared.detail),
+    );
   } finally {
     await exec.query("ROLLBACK");
   }
