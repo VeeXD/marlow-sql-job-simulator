@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ApiError, api, formatSim, readStoredSession } from "@/lib/api";
+import { SystemNote } from "@/components/system-note";
 
 type Evidence = {
   eventId: number | string | null;
@@ -67,7 +68,7 @@ export default function SignalsPage() {
 
       {data ? (
         <div className="mt-8 space-y-6">
-          <p className="rounded-lg border border-line bg-[#f8f1e4] px-4 py-3 text-sm">{data.label}</p>
+          <SystemNote>{data.label}</SystemNote>
           {data.dimensions.map((dimension) => (
             <section key={dimension.id} className="rounded-lg border border-line bg-card p-4">
               <header className="flex items-baseline justify-between gap-3">

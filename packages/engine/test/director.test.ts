@@ -166,6 +166,35 @@ describe("director", () => {
   });
 });
 
+describe("knowledge transfer", () => {
+  it("covers the brief, logs questions, and wraps", () => {
+    let state = createInitialState({ playerName: "Alex Morgan", difficulty: "guided" });
+    state = reduce(state, { type: "start" }).state;
+    const joined = reduce(state, { type: "join_kt" });
+    state = joined.state;
+    expect(state.kt.status).toBe("live");
+    const topics = joined.effects
+      .filter((effect) => effect.type === "telemetry" && effect.name === "kt_topic_covered")
+      .map((effect) => (effect.type === "telemetry" ? effect.payload.topic : ""));
+    expect(topics).toEqual(["company", "project", "landscape", "role", "duties", "who", "arrival", "done", "week"]);
+    expect(state.messages.some((message) => message.channel === "meeting:kt" && message.body.includes("Finance stopped trusting"))).toBe(true);
+    audit(state, 0);
+    const asked = reduce(state, {
+      type: "player_message",
+      channel: "meeting:kt",
+      body: "Who do I ping if the chart looks wrong?",
+    });
+    state = asked.state;
+    expect(state.kt.questionsAsked).toBe(1);
+    expect(asked.effects.some((effect) => effect.type === "telemetry" && effect.name === "kt_question")).toBe(true);
+    audit(state, 0);
+    const done = reduce(state, { type: "complete_kt" });
+    expect(done.state.kt.status).toBe("done");
+    expect(done.effects.some((effect) => effect.type === "telemetry" && effect.name === "kt_completed")).toBe(true);
+    audit(done.state, 0);
+  });
+});
+
 describe("clarifying question", () => {
   it("unlocks only the specific question", () => {
     expect(isOrderDefinitionQuestion("Should refunded orders be excluded?")).toBe(true);

@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ApiError, api, readStoredSession } from "@/lib/api";
 import type { Difficulty, World } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { SystemNote } from "@/components/system-note";
 import { Input } from "@/components/ui/input";
 
 export function SetupForm() {
@@ -132,7 +133,7 @@ export function SetupForm() {
                 return (
                   <label
                     key={option.id}
-                    className={`cursor-pointer rounded-lg border p-4 ${selected ? "border-pine bg-[#eef4f1]" : "border-line bg-card"}`}
+                    className={`cursor-pointer rounded-lg border p-4 ${selected ? "border-[#464EB8] bg-[#e8ebfa]" : "border-line bg-card"}`}
                   >
                     <input
                       type="radio"
@@ -149,20 +150,22 @@ export function SetupForm() {
             </div>
           </fieldset>
 
-          <label className="flex items-start gap-3 rounded-lg border border-line bg-card p-4 text-sm leading-relaxed">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={consent}
-              onChange={(event) => setConsent(event.target.checked)}
-              required
-            />
-            <span>
-              Practice mode records queries, messages, and timings. Checking this also records paste size, when the
-              window loses focus, and a typing-cadence summary — not the text you paste or the keys themselves.
-              Experimental. Not a hiring score. Kept with the session for 90 days. Nothing deletes it automatically yet.
-            </span>
-          </label>
+          <SystemNote>
+            <label className="flex items-start gap-3 text-sm leading-relaxed">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={consent}
+                onChange={(event) => setConsent(event.target.checked)}
+                required
+              />
+              <span>
+                Practice mode records queries, messages, and timings. Checking this also records paste size, when the
+                window loses focus, and a typing-cadence summary — not the text you paste or the keys themselves.
+                Experimental. Not a hiring score. Kept with the session for 90 days. Nothing deletes it automatically yet.
+              </span>
+            </label>
+          </SystemNote>
 
           {submitError ? <p className="text-sm text-clay">{submitError}</p> : null}
 

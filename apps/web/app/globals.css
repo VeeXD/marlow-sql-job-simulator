@@ -1,16 +1,18 @@
 @import "tailwindcss";
 
 :root {
-  --paper: #f3ecdf;
-  --ink: #1c1915;
-  --card: #fffaf3;
-  --line: #e3d6c4;
-  --pine: #1e4a42;
-  --pine-ink: #f4f7f4;
-  --clay: #8f3d32;
-  --navy: #1b2430;
-  --moss: #3f6b4a;
-  --muted: #6b6258;
+  --paper: #f5f5f5;
+  --ink: #242424;
+  --card: #ffffff;
+  --line: #e1e1e1;
+  --pine: #464eb8;
+  --pine-ink: #ffffff;
+  --clay: #c4314b;
+  --navy: #464eb8;
+  --moss: #0f7b0f;
+  --muted: #616161;
+  --teams: #6264a7;
+  --rail: #ebebeb;
 }
 
 @theme inline {
@@ -24,17 +26,19 @@
   --color-navy: var(--navy);
   --color-moss: var(--moss);
   --color-muted: var(--muted);
-  --font-sans: var(--font-geist-sans);
-  --font-serif: var(--font-newsreader);
-  --font-mono: var(--font-geist-mono);
+  --color-teams: var(--teams);
+  --color-rail: var(--rail);
+  --font-sans: "Segoe UI", "Segoe UI Web", "Segoe UI Historic", system-ui, sans-serif;
+  --font-serif: "Segoe UI", "Segoe UI Web", system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
 }
 
 body {
   background: var(--paper);
   color: var(--ink);
-  font-family: var(--font-geist-sans), "Segoe UI", sans-serif;
+  font-family: "Segoe UI", "Segoe UI Web", "Segoe UI Historic", system-ui, sans-serif;
 }
 
 ::selection {
-  background: #d5e6df;
+  background: #d6d8f5;
 }

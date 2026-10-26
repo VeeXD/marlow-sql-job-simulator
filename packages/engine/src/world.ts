@@ -18,7 +18,7 @@ export const CAST: Persona[] = [
     kind: "manager",
     pronouns: "she/her",
     voice:
-      "Direct, warm, short sentences. You set definitions and deadlines. You never write SQL or a step-by-step transform.",
+      "Manager. Warm, brief, a little dry. You set definitions and deadlines in chat, not memos. Yeah and okay so are fine. You never write SQL or a step-by-step transform.",
     channel: "dm:priya",
   },
   {
@@ -28,7 +28,7 @@ export const CAST: Persona[] = [
     kind: "teammate",
     pronouns: "he/him",
     voice:
-      "Precise about files, loads, and columns. You point at the ERD. You never write the player's transform.",
+      "Teammate who owns the files. Precise, a bit terse, sometimes two short messages. You point at the ERD. You never write the player's transform.",
     channel: "dm:jonah",
   },
   {
@@ -38,7 +38,7 @@ export const CAST: Persona[] = [
     kind: "consumer",
     pronouns: "he/him",
     voice:
-      "You consume churn_features. You care that the table is fresh and stable. You do not know how orders are cleaned and you will not invent the SQL.",
+      "Consumer of the churn model. Casual, a little impatient, not a SQL person. You care that churn_features is fresh. You will not invent the query.",
     channel: "dm:sam",
   },
   {
@@ -48,7 +48,7 @@ export const CAST: Persona[] = [
     kind: "stakeholder",
     pronouns: "they/them",
     voice:
-      "You run the exec revenue dashboard off daily_revenue. You ask whether the number moved and why. You are not a SQL person.",
+      "Consumer of the exec chart. Friendly, short, they/them. You ask whether the number moved. You are not a SQL person and you say so.",
     channel: "dm:riley",
   },
 ];

@@ -36,6 +36,7 @@ export type ChatMessage = {
   authorName: string;
   body: string;
   intent: string;
+  reaction?: string;
 };
 
 export type TicketState = {
@@ -150,6 +151,7 @@ export type SessionState = {
   standingLog: StandingLogEntry[];
   statusCredits: number;
   onboarding: { welcome: boolean; walkthrough: boolean; kickoff: boolean };
+  kt: { status: "scheduled" | "live" | "done"; topicsCovered: string[]; questionsAsked: number };
   kickoffAtSim: string | null;
   t3ReleasedAtSim: string | null;
   lastQueryAtSim: string | null;
@@ -205,7 +207,11 @@ export type TelemetryEventName =
   | "handoff_submitted"
   | "project_completed"
   | "next_project_chosen"
-  | "session_abandoned";
+  | "session_abandoned"
+  | "kt_joined"
+  | "kt_topic_covered"
+  | "kt_question"
+  | "kt_completed";
 
 export type SpeakEffect = {
   type: "speak";
@@ -247,7 +253,9 @@ export type DirectorEvent =
     }
   | { type: "submit_handoff"; body: string }
   | { type: "choose_next"; projectId: string }
-  | { type: "abandon" };
+  | { type: "abandon" }
+  | { type: "join_kt" }
+  | { type: "complete_kt" };
 
 export type ReduceResult = {
   state: SessionState;

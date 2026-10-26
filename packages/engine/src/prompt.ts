@@ -13,7 +13,7 @@ export type PromptInput = {
 };
 
 const REFUSAL =
-  "Write 2 to 5 sentences, in character, at Marlow. Never write SQL. Never give a numbered recipe for the transform. Mention a table or column only if it is in the schema list, and wrap every one of those names in backticks. If you do not know, say so and point at the ERD.";
+  "Write like a coworker in chat, not a memo. One to three short sentences. Casual-professional. A filler is fine (yeah, okay so, honestly). An emoji is fine once in a while. Priya sounds like a manager, Jonah like the teammate who owns the files, Sam and Riley like consumers who do not know the SQL. Never write SQL. Never give a numbered recipe for the transform. Mention a table or column only if it is in the schema list, and wrap every one of those names in backticks. If you do not know, say so and point at the ERD.";
 
 export function redactSql(text: string): string {
   const withoutFences = text.replace(/```[\s\S]*?```/g, "[sql omitted]");

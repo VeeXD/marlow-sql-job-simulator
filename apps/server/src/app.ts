@@ -13,6 +13,8 @@ import {
   openTicket,
   postChat,
   postQuery,
+  joinKt,
+  completeKt,
   runPipelineNow,
   savePipeline,
   recordSignal,
@@ -27,7 +29,7 @@ import {
 } from "./session.js";
 
 const difficulty = z.enum(["guided", "standard"]);
-const channel = z.enum(["team", "dm:priya", "dm:jonah", "dm:sam", "dm:riley"]);
+const channel = z.enum(["team", "dm:priya", "dm:jonah", "dm:sam", "dm:riley", "meeting:kt"]);
 
 function tokenFrom(header?: string): string {
   if (!header?.startsWith("Bearer ")) throw new HttpError(401, "Missing session token.");
@@ -66,6 +68,16 @@ export async function buildApp() {
   app.get("/api/sessions/:id", async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     return getSession(id, tokenFrom(request.headers.authorization));
+  });
+
+  app.post("/api/sessions/:id/kt/join", async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    return joinKt(id, tokenFrom(request.headers.authorization));
+  });
+
+  app.post("/api/sessions/:id/kt/complete", async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    return completeKt(id, tokenFrom(request.headers.authorization));
   });
 
   app.post("/api/sessions/:id/chat", async (request) => {

@@ -31,6 +31,7 @@ export type ChatMessage = {
   authorName: string;
   body: string;
   intent: string;
+  reaction?: string;
 };
 
 export type Ticket = {
@@ -61,6 +62,7 @@ export type Session = {
   messages: ChatMessage[];
   tickets: Ticket[];
   onboarding: { welcome: boolean; walkthrough: boolean; kickoff: boolean };
+  kt: { status: "scheduled" | "live" | "done"; topicsCovered: string[]; questionsAsked: number };
   breakStatus: "pending" | "active" | "fixed";
   breakFixed: boolean;
   projectCompleted: boolean;
@@ -161,8 +163,10 @@ export const STAGE_LABELS: { id: string; label: string }[] = [
 ];
 
 export const PERSONA_TONE: Record<PersonaId, string> = {
-  priya: "bg-[#e7f0ec] text-[#1e4a42]",
-  jonah: "bg-[#e7ebf2] text-[#1b2430]",
-  sam: "bg-[#f8efd8] text-[#8a5a10]",
-  riley: "bg-[#f8e8e4] text-[#8f3d32]",
+  priya: "bg-[#464EB8]",
+  jonah: "bg-[#6264A7]",
+  sam: "bg-[#4F6BED]",
+  riley: "bg-[#C4314B]",
 };
+
+export const CHANNELS_DM = CHANNELS.filter((item) => item.id.startsWith("dm:"));

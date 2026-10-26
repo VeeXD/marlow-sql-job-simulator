@@ -75,7 +75,9 @@ const baseProvider = createProviderFromEnv();
 const provider = {
   id: baseProvider.id,
   async complete(req: { model: "manager" | "teammate"; system: string; user: string; fallback: string }) {
-    const key = `llm:${createHash("sha256").update(`${req.model}\n${req.system}\n${req.user}`).digest("hex")}`;
+    // Fallback is part of the key so a mock (or a rejected draft) cannot reuse
+    // another line from the same persona prompt. Bursts share a system prompt.
+    const key = `llm:${createHash("sha256").update(`${req.model}\n${req.fallback}\n${req.system}\n${req.user}`).digest("hex")}`;
     if (redisGet) {
       const hit = await redisGet(key).catch(() => null);
       if (hit) return hit;
@@ -347,6 +349,7 @@ export function toDto(session: SessionRow) {
       .filter((ticket) => ticket.released)
       .map(({ hiddenEvaluation: _hidden, ...ticket }) => ticket),
     onboarding: state.onboarding,
+    kt: state.kt ?? { status: "scheduled" as const, topicsCovered: [], questionsAsked: 0 },
     breakStatus: state.breakStatus,
     breakFixed: state.breakFixed,
     projectCompleted: state.projectCompleted,
@@ -420,6 +423,22 @@ function randomBytesToken(): string {
 export async function getSession(id: string, token: string) {
   return withSession(id, token, async (ctx) => {
     await syncClock(ctx);
+    return toDto(ctx.session);
+  });
+}
+
+export async function joinKt(id: string, token: string) {
+  return withSession(id, token, async (ctx) => {
+    await touch(ctx);
+    await dispatch(ctx, { type: "join_kt" });
+    return toDto(ctx.session);
+  });
+}
+
+export async function completeKt(id: string, token: string) {
+  return withSession(id, token, async (ctx) => {
+    await touch(ctx);
+    await dispatch(ctx, { type: "complete_kt" });
     return toDto(ctx.session);
   });
 }

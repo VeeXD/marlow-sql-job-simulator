@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { io } from "socket.io-client";
 import {
+  Bell,
   CalendarDays,
   Cable,
   Database,
@@ -11,20 +12,22 @@ import {
   MessageSquare,
   Play,
   Plus,
+  Search,
   Trash2,
-  Workflow,
+  Users,
 } from "lucide-react";
 import { ApiError, api, clearStoredSession, formatSim, readStoredSession, simParts } from "@/lib/api";
 import {
-  CHANNELS,
-  PERSONA_TONE,
+  CHANNELS_DM,
   STAGE_LABELS,
+  type ChatMessage,
   type PersonaId,
   type QueryResult,
   type SchemaPayload,
   type Session,
   type Ticket,
 } from "@/lib/types";
+import { SystemNote } from "@/components/system-note";
 import { Prose } from "@/components/prose";
 import { SqlEditor } from "@/components/sql-editor";
 import { Badge } from "@/components/ui/badge";
@@ -38,20 +41,21 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 const DEFAULT_SQL = "SELECT COUNT(*) AS rows FROM raw_orders;\n";
 
-type Pane = "board" | "chat" | "sql" | "pipeline" | "week";
+type Pane = "activity" | "chat" | "teams" | "calendar" | "board" | "workbench" | "meeting";
 
 export function Workplace() {
   const stored = useRef(readStoredSession());
   const gen = useRef(0);
   const sessionRef = useRef<Session | null>(null);
-  const threadRef = useRef<HTMLDivElement>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [booting, setBooting] = useState(true);
   const [fatal, setFatal] = useState<string | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   sessionRef.current = session;
   const [pane, setPane] = useState<Pane>("chat");
+  const [bench, setBench] = useState<"sql" | "pipeline">("sql");
   const [channel, setChannel] = useState("dm:priya");
+  const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sql, setSql] = useState(DEFAULT_SQL);
@@ -157,10 +161,6 @@ export function Workplace() {
     };
   }, [refresh]);
 
-  useEffect(() => {
-    const box = threadRef.current;
-    if (box) box.scrollTop = box.scrollHeight;
-  }, [session?.messages.length, channel, pane]);
 
   async function mutate<T>(path: string, init?: RequestInit): Promise<{ mine: number; value: T }> {
     const current = stored.current;
@@ -191,72 +191,151 @@ export function Workplace() {
     );
   }
 
-  const messages = session.messages.filter((message) => message.channel === channel);
+  const joinMeeting = async () => {
+    try {
+      const { mine, value } = await mutate<Session>(`/api/sessions/${session.id}/kt/join`, { method: "POST" });
+      commit(mine, value);
+      setPane("meeting");
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Could not join the knowledge transfer.");
+      setPane("meeting");
+    }
+  }
+
+  const wrapMeeting = async () => {
+    try {
+      const { mine, value } = await mutate<Session>(`/api/sessions/${session.id}/kt/complete`, { method: "POST" });
+      commit(mine, value);
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Could not wrap the knowledge transfer.");
+    }
+  }
+
+  const activeChannel = pane === "teams" ? "team" : pane === "meeting" ? "meeting:kt" : channel;
+  const messages = session.messages.filter((message) => message.channel === activeChannel);
   const stageLabel = STAGE_LABELS.find((stage) => stage.id === session.stage)?.label ?? session.stage;
+  const query = search.trim().toLowerCase();
+  const searchHits = query
+    ? [
+        ...session.tickets
+          .filter((item) => `${item.key} ${item.title}`.toLowerCase().includes(query))
+          .map((item) => ({ kind: "ticket" as const, id: item.id, label: `${item.key} ${item.title}` })),
+        ...session.cast
+          .filter((person) => person.name.toLowerCase().includes(query))
+          .map((person) => ({ kind: "person" as const, id: person.id, label: person.name })),
+        ...session.messages
+          .filter((message) => message.body.toLowerCase().includes(query))
+          .slice(-6)
+          .map((message) => ({ kind: "message" as const, id: message.id, label: `${message.authorName}: ${message.body.slice(0, 72)}`, channel: message.channel })),
+      ]
+    : [];
+
+  const sendChat = async (target: string) => {
+    const body = draft.trim();
+    if (!body) return;
+    setSending(true);
+    try {
+      const { mine, value } = await mutate<Session>(`/api/sessions/${session.id}/chat`, {
+        method: "POST",
+        body: JSON.stringify({ channel: target, body }),
+      });
+      commit(mine, value);
+      setDraft("");
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Message didn't send.");
+    } finally {
+      setSending(false);
+    }
+  }
 
   return (
     <TooltipProvider delayDuration={250}>
-      <div className="flex h-dvh flex-col">
-        <header className="border-b border-navy bg-navy text-white">
-          <div className="flex flex-wrap items-center gap-3 px-3 py-2.5 sm:px-4">
-            <div className="min-w-0">
-              <p className="font-serif text-lg leading-none">Marlow</p>
-              <p className="mt-1 truncate text-xs text-white/70">
-                {session.project.title} · {session.playerName} · {session.difficulty}
-              </p>
-            </div>
-            <Badge className="bg-white/10 text-white">{stageLabel}</Badge>
-            <p className="text-xs text-white/80">{formatSim(session.simNow)}</p>
-            {session.clockPaused ? <Badge variant="risk">Clock paused</Badge> : null}
-            <div className="ml-auto flex items-center gap-1">
+      <div className="flex h-dvh flex-col bg-[#f5f5f5] text-[#242424]">
+        <Tabs value={pane} onValueChange={(value) => setPane(value as Pane)} className="flex min-h-0 min-w-0 flex-1 flex-row">
+          <TabsList className="h-full w-[4.5rem] shrink-0 flex-col items-stretch gap-1 border-r border-[#d1d1d1] bg-[#ebebeb] px-1 py-2">
+            <p className="px-1 pb-2 text-center text-[10px] font-semibold text-[#464EB8]">Marlow</p>
+            <RailButton value="activity" icon={<Bell className="h-5 w-5" />} label="Activity" />
+            <RailButton value="chat" icon={<MessageSquare className="h-5 w-5" />} label="Chat" />
+            <RailButton value="teams" icon={<Users className="h-5 w-5" />} label="Teams" />
+            <RailButton value="calendar" icon={<CalendarDays className="h-5 w-5" />} label="Calendar" />
+            <RailButton value="board" icon={<KanbanSquare className="h-5 w-5" />} label="Board" />
+            <RailButton value="workbench" icon={<Database className="h-5 w-5" />} label="Workbench" />
+            <button
+              type="button"
+              onClick={() => setConnOpen(true)}
+              className="mt-auto flex flex-col items-center gap-1 rounded-md px-1 py-2 text-[10px] text-[#616161] hover:bg-white"
+            >
+              <Cable className="h-5 w-5" />
+              Connections
+            </button>
+          </TabsList>
+
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <header className="flex items-center gap-3 border-b border-[#e1e1e1] bg-white px-3 py-2">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#616161]" />
+                <Input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search"
+                  className="h-8 border-[#e1e1e1] bg-[#f5f5f5] pl-8"
+                  aria-label="Search"
+                />
+                {searchHits.length > 0 ? (
+                  <ul className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border border-[#e1e1e1] bg-white py-1 text-sm shadow-lg">
+                    {searchHits.map((hit) => (
+                      <li key={`${hit.kind}-${hit.id}`}>
+                        <button
+                          type="button"
+                          className="block w-full truncate px-3 py-1.5 text-left hover:bg-[#f5f5f5]"
+                          onClick={() => {
+                            setSearch("");
+                            if (hit.kind === "ticket") {
+                              setPane("board");
+                              const item = session.tickets.find((ticket) => ticket.id === hit.id);
+                              if (item) setTicket(item);
+                            } else if (hit.kind === "person") {
+                              setPane("chat");
+                              setChannel(`dm:${hit.id}`);
+                            } else {
+                              setPane(hit.channel === "team" ? "teams" : hit.channel === "meeting:kt" ? "meeting" : "chat");
+                              if (hit.channel.startsWith("dm:")) setChannel(hit.channel);
+                            }
+                          }}
+                        >
+                          {hit.label}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
               <StandingStrip session={session} />
-              <Button variant="outline" size="sm" className="border-white/20 bg-transparent text-white hover:bg-white/10" onClick={() => setErdOpen(true)}>
-                <Database className="h-3.5 w-3.5" />
+              <Button variant="outline" size="sm" onClick={() => setErdOpen(true)}>
                 ERD
               </Button>
-              <Button variant="outline" size="sm" className="border-white/20 bg-transparent text-white hover:bg-white/10" onClick={() => setConnOpen(true)}>
-                <Cable className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Connections</span>
-              </Button>
-            </div>
-          </div>
-          <div className="flex gap-1 overflow-x-auto px-3 pb-2 text-[11px] text-white/55 sm:px-4">
-            {STAGE_LABELS.map((stage, index) => (
-              <span key={stage.id} className={stage.id === session.stage ? "text-white" : ""}>
-                {index > 0 ? <span className="px-1 text-white/30">/</span> : null}
-                {String(index + 1).padStart(2, "0")} {stage.label}
-              </span>
-            ))}
-          </div>
-        </header>
+              <SystemNote className="hidden max-w-xs truncate py-1 text-xs lg:block">
+                {stageLabel} · {formatSim(session.simNow)}
+                {session.clockPaused ? " · clock paused" : ""}
+              </SystemNote>
+            </header>
 
-        {session.breakStatus === "active" ? (
-          <div className="border-b-2 border-clay bg-[#f8e8e4] px-4 py-2 text-sm text-clay">
-            A late file landed after a run. Riley&apos;s chart and Sam&apos;s features can drift until you rebuild from the landing zone.
-          </div>
-        ) : null}
-        {session.breakFixed && !session.projectCompleted ? (
-          <div className="border-b border-line bg-[#f8efd8] px-4 py-2 text-sm text-[#8a5a10]">
-            The tables caught the late file. The project still needs the handoff note.
-          </div>
-        ) : null}
-        {banner ? (
-          <div className="flex items-center justify-between gap-3 border-b border-clay/30 bg-[#f8e8e4] px-4 py-2 text-sm text-clay">
-            <span>{banner}</span>
-            <button className="underline" onClick={() => setBanner(null)}>
-              Dismiss
-            </button>
-          </div>
-        ) : null}
-
-        <Tabs value={pane} onValueChange={(value) => setPane(value as Pane)} className="flex min-h-0 flex-1 flex-col">
-          <TabsList className="border-b border-line bg-paper px-2 py-1.5">
-            <TabsTrigger value="board"><KanbanSquare className="h-3.5 w-3.5" /> Board</TabsTrigger>
-            <TabsTrigger value="chat"><MessageSquare className="h-3.5 w-3.5" /> Chat</TabsTrigger>
-            <TabsTrigger value="sql"><Database className="h-3.5 w-3.5" /> SQL</TabsTrigger>
-            <TabsTrigger value="pipeline"><Workflow className="h-3.5 w-3.5" /> Pipeline</TabsTrigger>
-            <TabsTrigger value="week"><CalendarDays className="h-3.5 w-3.5" /> Week</TabsTrigger>
-          </TabsList>
+            {session.breakStatus === "active" ? (
+              <SystemNote className="rounded-none border-x-0">
+                A late file landed after a run. Riley&apos;s chart and Sam&apos;s features can drift until you rebuild from the landing zone.
+              </SystemNote>
+            ) : null}
+            {session.breakFixed && !session.projectCompleted ? (
+              <SystemNote className="rounded-none border-x-0">The tables caught the late file. The project still needs the handoff note.</SystemNote>
+            ) : null}
+            {banner ? (
+              <SystemNote className="flex items-center justify-between gap-3 rounded-none border-x-0">
+                <span>{banner}</span>
+                <button className="underline" onClick={() => setBanner(null)}>
+                  Dismiss
+                </button>
+              </SystemNote>
+            ) : null}
 
           <TabsContent value="board" className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
             <Board
@@ -275,133 +354,157 @@ export function Workplace() {
             />
           </TabsContent>
 
+          <TabsContent value="activity" className="min-h-0 flex-1 overflow-auto p-4">
+            <Activity session={session} onOpenChannel={(next) => { setChannel(next); setPane(next === "team" ? "teams" : "chat"); }} onOpenMeeting={() => setPane("meeting")} />
+          </TabsContent>
+
           <TabsContent value="chat" className="flex min-h-0 flex-1 flex-col md:flex-row">
-            <aside className="flex gap-1 overflow-x-auto border-b border-line p-2 md:w-56 md:flex-col md:overflow-y-auto md:border-b-0 md:border-r">
-              {CHANNELS.map((item) => {
-                const count = session.messages.filter((message) => message.channel === item.id).length;
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => setChannel(item.id)}
-                    className={`rounded-md px-3 py-2 text-left text-sm ${channel === item.id ? "bg-card shadow-sm" : "hover:bg-black/5"}`}
-                  >
-                    <span className="block font-medium">{item.label}</span>
-                    <span className="block text-xs text-muted">
-                      {item.hint}
-                      {count ? ` · ${count}` : ""}
+            <ChannelList
+              items={CHANNELS_DM}
+              active={channel}
+              session={session}
+              onPick={(id) => { setChannel(id); }}
+            />
+            <Conversation
+              sessionId={session.id}
+              title={CHANNELS_DM.find((item) => item.id === channel)?.label ?? "Chat"}
+              messages={messages}
+              draft={draft}
+              setDraft={setDraft}
+              sending={sending}
+              placeholder={channel === "dm:priya" ? "Message Priya" : "Message"}
+              provider={session.llmProvider}
+              onSubmit={() => void sendChat(channel)}
+            />
+          </TabsContent>
+
+          <TabsContent value="teams" className="flex min-h-0 flex-1 flex-col md:flex-row">
+            <aside className="border-b border-[#e1e1e1] bg-white p-3 md:w-60 md:border-b-0 md:border-r">
+              <p className="text-xs font-semibold uppercase tracking-wide text-[#616161]">Commerce</p>
+              <button type="button" className="mt-2 w-full rounded-md bg-[#e8ebfa] px-3 py-2 text-left text-sm font-medium text-[#464EB8]">
+                General
+              </button>
+              <p className="mt-4 text-xs font-semibold uppercase tracking-wide text-[#616161]">People</p>
+              <ul className="mt-2 space-y-2">
+                {session.cast.map((person) => (
+                  <li key={person.id} className="flex items-center gap-2 text-sm">
+                    <Avatar id={person.id} name={person.name} presence={presenceFor(session.standing[person.id])} />
+                    <span>
+                      <span className="block leading-tight">{person.name}</span>
+                      <span className="block text-[11px] text-[#616161]">{person.role}</span>
                     </span>
-                  </button>
-                );
-              })}
+                  </li>
+                ))}
+              </ul>
             </aside>
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-              <div ref={threadRef} className="min-h-0 flex-1 overflow-y-auto">
-                <div className="space-y-3 p-3 sm:p-4">
-                  {messages.length === 0 ? (
-                    <p className="text-sm text-muted">
-                      Nothing in this channel yet. Priya writes first. The simulated clock moves while you&apos;re here, then pauses if you go quiet.
-                    </p>
-                  ) : (
-                    messages.map((message) => <MessageBubble key={message.id} message={message} />)
-                  )}
-                </div>
+            <Conversation
+              sessionId={session.id}
+              title="General"
+              messages={session.messages.filter((message) => message.channel === "team")}
+              draft={draft}
+              setDraft={setDraft}
+              sending={sending}
+              placeholder="Message Commerce"
+              provider={session.llmProvider}
+              onSubmit={() => void sendChat("team")}
+            />
+          </TabsContent>
+
+          <TabsContent value="meeting" className="flex min-h-0 flex-1 flex-col">
+            <div className="flex items-center justify-between border-b border-[#e1e1e1] bg-white px-4 py-2">
+              <div>
+                <p className="text-sm font-semibold">Knowledge transfer</p>
+                <p className="text-xs text-[#616161]">Priya Shah · Commerce · transcript</p>
               </div>
-              <form
-                className="border-t border-line p-3"
-                onSubmit={async (event) => {
-                  event.preventDefault();
-                  const body = draft.trim();
-                  if (!body) return;
-                  setSending(true);
+              <div className="flex gap-2">
+                {session.kt?.status !== "live" && session.kt?.status !== "done" ? (
+                  <Button size="sm" onClick={() => void joinMeeting()}>Join</Button>
+                ) : null}
+                {session.kt?.status === "live" ? (
+                  <Button size="sm" variant="outline" onClick={() => void wrapMeeting()}>Wrap the meeting</Button>
+                ) : null}
+              </div>
+            </div>
+            <SystemNote className="m-3">
+              Meeting transcript. Questions you ask here are logged for the signals page. This is not a score.
+            </SystemNote>
+            <Conversation
+              sessionId={session.id}
+              title="Knowledge transfer"
+              messages={session.messages.filter((message) => message.channel === "meeting:kt")}
+              draft={draft}
+              setDraft={setDraft}
+              sending={sending}
+              placeholder="Ask Priya during the KT"
+              provider={session.llmProvider}
+              onSubmit={() => void sendChat("meeting:kt")}
+              hideHeader
+            />
+          </TabsContent>
+
+          <TabsContent value="workbench" className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
+            <div className="mb-3 flex gap-2">
+              <Button size="sm" variant={bench === "sql" ? "default" : "outline"} onClick={() => setBench("sql")}>SQL</Button>
+              <Button size="sm" variant={bench === "pipeline" ? "default" : "outline"} onClick={() => setBench("pipeline")}>Pipeline</Button>
+            </div>
+            {bench === "sql" ? (
+              <Workbench
+                sql={sql}
+                setSql={setSql}
+                running={running}
+                result={result}
+                notice={session.consent.integritySignals ? session.consent.notice : null}
+                onPasteChars={notePaste}
+                onType={noteKey}
+                onRun={async () => {
+                  setRunning(true);
                   try {
-                    const { mine, value } = await mutate<Session>(`/api/sessions/${session.id}/chat`, {
+                    const { mine, value } = await mutate<{ session: Session; result: QueryResult }>(`/api/sessions/${session.id}/query`, {
                       method: "POST",
-                      body: JSON.stringify({ channel, body }),
+                      body: JSON.stringify({ sql }),
                     });
-                    commit(mine, value);
-                    setDraft("");
+                    commit(mine, value.session);
+                    setResult(value.result);
                   } catch (err) {
-                    setBanner(err instanceof Error ? err.message : "Message didn't send.");
+                    setBanner(err instanceof Error ? err.message : "Query failed to send.");
                   } finally {
-                    setSending(false);
+                    setRunning(false);
                   }
                 }}
-              >
-                <Textarea
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  placeholder={channel === "dm:priya" ? "Ask Priya. She answers the question you actually ask." : "Write to the team. They won't do the ticket."}
-                  maxLength={4000}
-                  className="min-h-20"
-                />
-                <div className="mt-2 flex items-center justify-between">
-                  <p className="text-xs text-muted">Replies are worded by {session.llmProvider}. The director decides when someone speaks.</p>
-                  <Button type="submit" disabled={sending || draft.trim().length === 0}>
-                    {sending ? "Sending…" : "Send"}
-                  </Button>
-                </div>
-              </form>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="sql" className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
-            <Workbench
-              sql={sql}
-              setSql={setSql}
-              running={running}
-              result={result}
-              notice={session.consent.integritySignals ? session.consent.notice : null}
-              onPasteChars={notePaste}
-              onType={noteKey}
-              onRun={async () => {
-                setRunning(true);
-                try {
-                  const { mine, value } = await mutate<{ session: Session; result: QueryResult }>(`/api/sessions/${session.id}/query`, {
-                    method: "POST",
-                    body: JSON.stringify({ sql }),
-                  });
-                  commit(mine, value.session);
-                  setResult(value.result);
-                } catch (err) {
-                  setBanner(err instanceof Error ? err.message : "Query failed to send.");
-                } finally {
-                  setRunning(false);
+              />
+            ) : (
+              <PipelinePane
+                session={session}
+                onError={setBanner}
+                onPasteChars={notePaste}
+                onType={noteKey}
+                onSession={(mine, next) => commit(mine, next)}
+                save={(steps, schedule) =>
+                  mutate<Session>(`/api/sessions/${session.id}/pipeline`, {
+                    method: "PUT",
+                    body: JSON.stringify({ steps, schedule }),
+                  })
                 }
-              }}
-            />
+                run={() => mutate<Session>(`/api/sessions/${session.id}/pipeline/run`, { method: "POST" })}
+              />
+            )}
           </TabsContent>
 
-          <TabsContent value="pipeline" className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
-            <PipelinePane
-              session={session}
-              onError={setBanner}
-              onPasteChars={notePaste}
-              onType={noteKey}
-              onSession={(mine, next) => commit(mine, next)}
-              save={(steps, schedule) =>
-                mutate<Session>(`/api/sessions/${session.id}/pipeline`, {
-                  method: "PUT",
-                  body: JSON.stringify({ steps, schedule }),
-                })
-              }
-              run={() => mutate<Session>(`/api/sessions/${session.id}/pipeline/run`, { method: "POST" })}
-            />
+          <TabsContent value="calendar" className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
+            <Week session={session} onJoin={() => void joinMeeting()} onOpen={() => setPane("meeting")} />
           </TabsContent>
-
-          <TabsContent value="week" className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
-            <Week session={session} />
-          </TabsContent>
+            </div>
         </Tabs>
 
-        <footer className="flex items-center justify-between gap-3 border-t border-line px-3 py-1.5 text-[11px] text-muted">
-          <span>Standing can fall and recover. It never locks a person or a table.</span>
-          <span className="flex items-center gap-3">
+        <footer className="flex items-center justify-between gap-3 border-t border-[#e1e1e1] bg-white px-3 py-1.5">
+          <SystemNote className="py-1 text-xs">Standing can fall and recover. It never locks a person or a table.</SystemNote>
+          <span className="flex items-center gap-3 text-xs">
             {session.signalsPage ? (
-              <Link href="/signals" className="underline">
+              <Link href="/signals" className="text-[#464EB8] underline">
                 Signals
               </Link>
             ) : null}
-            <button className="underline" onClick={() => setLeaveOpen(true)}>
+            <button className="text-[#464EB8] underline" onClick={() => setLeaveOpen(true)}>
               Leave the project
             </button>
           </span>
@@ -466,14 +569,49 @@ export function Workplace() {
   );
 }
 
+function presenceFor(standing: number): "online" | "away" | "busy" {
+  if (standing >= 70) return "online";
+  if (standing >= 50) return "away";
+  return "busy";
+}
+
+function Avatar({ id, name, presence = "online" }: { id: string; name: string; presence?: "online" | "away" | "busy" }) {
+  const initials = name
+    .split(" ")
+    .map((part) => part[0])
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+  const color = id === "sam" ? "#4F6BED" : id === "riley" ? "#C4314B" : id === "jonah" ? "#6264A7" : id === "player" ? "#242424" : "#464EB8";
+  const dot = presence === "busy" ? "#C4314B" : presence === "away" ? "#F8D22A" : "#6BB700";
+  return (
+    <span className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold text-white" style={{ background: color }}>
+      {initials}
+      <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-white" style={{ background: dot }} />
+    </span>
+  );
+}
+
+function RailButton({ value, icon, label }: { value: string; icon: ReactNode; label: string }) {
+  return (
+    <TabsTrigger value={value} className="flex h-auto flex-col gap-1 px-1 py-2 text-[10px] data-[state=active]:bg-white data-[state=active]:text-[#464EB8]">
+      {icon}
+      {label}
+    </TabsTrigger>
+  );
+}
+
 function StandingStrip({ session }: { session: Session }) {
   return (
     <div className="hidden items-center gap-1 lg:flex">
       {session.cast.map((person) => (
         <Tooltip key={person.id}>
           <TooltipTrigger asChild>
-            <span className={`rounded-full px-2 py-0.5 text-[11px] ${PERSONA_TONE[person.id]}`}>
-              {person.name.split(" ")[0]} {session.standing[person.id]}
+            <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f5f5] px-1.5 py-0.5 text-[11px]">
+              <Avatar id={person.id} name={person.name} presence={presenceFor(session.standing[person.id])} />
+              <span className="pr-1">
+                {person.name.split(" ")[0]} {session.standing[person.id]}
+              </span>
             </span>
           </TooltipTrigger>
           <TooltipContent>
@@ -488,15 +626,279 @@ function StandingStrip({ session }: { session: Session }) {
 
 function MessageBubble({ message }: { message: Session["messages"][number] }) {
   const mine = message.author === "player";
-  const tone = mine ? "bg-navy text-white" : PERSONA_TONE[message.author as PersonaId];
   return (
-    <article className={`max-w-[42rem] rounded-lg px-3 py-2 ${mine ? "ml-auto" : ""} ${tone}`}>
-      <header className="flex items-baseline justify-between gap-3 text-[11px] opacity-70">
-        <span>{message.authorName}</span>
-        <time>{formatSim(message.atSim)}</time>
-      </header>
-      <Prose text={message.body} className="mt-1 text-sm leading-relaxed" />
+    <article className={`flex gap-2 ${mine ? "flex-row-reverse" : ""}`}>
+      <Avatar id={mine ? "player" : message.author} name={message.authorName} presence={mine ? "online" : "online"} />
+      <div className={`max-w-[36rem] ${mine ? "text-right" : ""}`}>
+        <header className={`mb-1 flex items-baseline gap-2 text-[11px] text-[#616161] ${mine ? "justify-end" : ""}`}>
+          <span className="font-semibold text-[#242424]">{message.authorName}</span>
+          <time>{formatSim(message.atSim)}</time>
+        </header>
+        <div className={`rounded-md px-3 py-2 text-left text-sm leading-relaxed ${mine ? "bg-[#e8ebfa]" : "border border-[#e1e1e1] bg-white"}`}>
+          <Prose text={message.body} />
+        </div>
+        {message.reaction ? (
+          <span className="mt-1 inline-flex rounded-full border border-[#e1e1e1] bg-white px-1.5 text-xs">{message.reaction}</span>
+        ) : null}
+      </div>
     </article>
+  );
+}
+
+const seenMemory = new Map<string, Set<string>>();
+
+function rememberSeen(sessionId: string): Set<string> {
+  const existing = seenMemory.get(sessionId);
+  if (existing) return existing;
+  const seen = new Set<string>();
+  if (typeof window !== "undefined") {
+    try {
+      const raw = sessionStorage.getItem(`marlow.seen.${sessionId}`);
+      if (raw) {
+        for (const id of JSON.parse(raw) as string[]) seen.add(id);
+      }
+    } catch {
+      // A bad cache just means the thread types the history once.
+    }
+  }
+  seenMemory.set(sessionId, seen);
+  return seen;
+}
+
+function persistSeen(sessionId: string, seen: Set<string>) {
+  if (typeof window === "undefined") return;
+  sessionStorage.setItem(`marlow.seen.${sessionId}`, JSON.stringify([...seen]));
+}
+
+function Thread({ sessionId, messages }: { sessionId: string; messages: ChatMessage[] }) {
+  const queue = useRef<ChatMessage[]>([]);
+  const playing = useRef(false);
+  const alive = useRef(true);
+  const [hidden, setHidden] = useState<Set<string>>(() => {
+    const seen = rememberSeen(sessionId);
+    return new Set(messages.filter((message) => message.author !== "player" && !seen.has(message.id)).map((message) => message.id));
+  });
+  const [typingName, setTypingName] = useState<string | null>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const signature = messages.map((message) => message.id).join("|");
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const seen = rememberSeen(sessionId);
+    let added = false;
+    for (const message of messages) {
+      if (message.author === "player") {
+        seen.add(message.id);
+        continue;
+      }
+      if (seen.has(message.id) || queue.current.some((item) => item.id === message.id)) continue;
+      queue.current.push(message);
+      added = true;
+    }
+    if (added) {
+      setHidden((current) => {
+        const next = new Set(current);
+        for (const item of queue.current) next.add(item.id);
+        return next;
+      });
+      setTypingName((current) => current ?? queue.current[0]?.authorName ?? null);
+    }
+    const run = async () => {
+      if (playing.current) return;
+      playing.current = true;
+      while (alive.current && queue.current.length > 0) {
+        const message = queue.current[0];
+        setTypingName(message.authorName);
+        await new Promise((resolve) => setTimeout(resolve, 680));
+        if (!alive.current) break;
+        if (queue.current[0]?.id !== message.id) continue;
+        queue.current.shift();
+        seen.add(message.id);
+        persistSeen(sessionId, seen);
+        setHidden((current) => {
+          const next = new Set(current);
+          next.delete(message.id);
+          return next;
+        });
+        setTypingName(null);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      playing.current = false;
+      if (!alive.current) return;
+      setTypingName(null);
+      if (queue.current.length > 0) void run();
+    };
+    void run();
+  }, [signature, sessionId, messages]);
+
+  useEffect(() => {
+    const node = box.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [signature, hidden, typingName]);
+
+  const seen = rememberSeen(sessionId);
+  const visible = messages.filter((message) => message.author === "player" || (seen.has(message.id) && !hidden.has(message.id)));
+  return (
+    <div ref={box} className="min-h-0 flex-1 overflow-y-auto">
+      <div className="space-y-3 p-3 sm:p-4">
+        {visible.length === 0 && !typingName ? (
+          <SystemNote>Nothing in this thread yet. The clock moves while you work, then pauses if you go quiet.</SystemNote>
+        ) : null}
+        {visible.map((message) => (
+          <MessageBubble key={message.id} message={message} />
+        ))}
+        {typingName ? (
+          <p className="flex items-center gap-2 text-xs text-[#616161]">
+            <span className="flex gap-1">
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#6264A7]" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#6264A7] [animation-delay:120ms]" />
+              <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[#6264A7] [animation-delay:240ms]" />
+            </span>
+            {typingName} is typing
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function Conversation({
+  sessionId,
+  title,
+  messages,
+  draft,
+  setDraft,
+  sending,
+  placeholder,
+  provider,
+  onSubmit,
+  hideHeader = false,
+}: {
+  sessionId: string;
+  title: string;
+  messages: ChatMessage[];
+  draft: string;
+  setDraft: (value: string) => void;
+  sending: boolean;
+  placeholder: string;
+  provider: string;
+  onSubmit: () => void;
+  hideHeader?: boolean;
+}) {
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#f5f5f5]">
+      {hideHeader ? null : (
+        <div className="border-b border-[#e1e1e1] bg-white px-4 py-2">
+          <p className="text-sm font-semibold">{title}</p>
+        </div>
+      )}
+      <Thread sessionId={sessionId} messages={messages} />
+      <form
+        className="border-t border-[#e1e1e1] bg-white p-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit();
+        }}
+      >
+        <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={placeholder} maxLength={4000} className="min-h-16" />
+        <div className="mt-2 flex items-center justify-between gap-3">
+          <SystemNote className="py-1 text-xs">Replies are worded by {provider}. The director decides when someone speaks.</SystemNote>
+          <Button type="submit" disabled={sending || draft.trim().length === 0}>
+            {sending ? "Sending…" : "Send"}
+          </Button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ChannelList({
+  items,
+  active,
+  session,
+  onPick,
+}: {
+  items: { id: string; label: string; hint: string }[];
+  active: string;
+  session: Session;
+  onPick: (id: string) => void;
+}) {
+  return (
+    <aside className="flex gap-1 overflow-x-auto border-b border-[#e1e1e1] bg-white p-2 md:w-64 md:flex-col md:overflow-y-auto md:border-b-0 md:border-r">
+      {items.map((item) => {
+        const persona = item.id.slice(3) as PersonaId;
+        const count = session.messages.filter((message) => message.channel === item.id).length;
+        return (
+          <button
+            key={item.id}
+            onClick={() => onPick(item.id)}
+            className={`flex items-center gap-2 rounded-md px-2 py-2 text-left text-sm ${active === item.id ? "bg-[#e8ebfa]" : "hover:bg-[#f5f5f5]"}`}
+          >
+            <Avatar id={persona} name={item.label} presence={presenceFor(session.standing[persona] ?? 72)} />
+            <span>
+              <span className="block font-medium">{item.label}</span>
+              <span className="block text-xs text-[#616161]">
+                {item.hint}
+                {count ? ` · ${count}` : ""}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+    </aside>
+  );
+}
+
+function Activity({
+  session,
+  onOpenChannel,
+  onOpenMeeting,
+}: {
+  session: Session;
+  onOpenChannel: (channel: string) => void;
+  onOpenMeeting: () => void;
+}) {
+  const recent = [...session.messages].slice(-8).reverse();
+  return (
+    <div className="mx-auto max-w-2xl space-y-3">
+      <h2 className="text-lg font-semibold">Activity</h2>
+      <SystemNote>
+        Practice mode is on. The desk records queries, messages, and timings. Experimental. Not a hiring score.
+        {session.clockPaused ? " The clock is paused." : " The clock is moving."}
+      </SystemNote>
+      {session.kt?.status !== "done" ? (
+        <button type="button" onClick={onOpenMeeting} className="block w-full rounded-md border border-[#e1e1e1] bg-white p-3 text-left hover:border-[#464EB8]">
+          <span className="text-xs font-semibold uppercase tracking-wide text-[#464EB8]">Meeting</span>
+          <span className="mt-1 block text-sm font-medium">Knowledge transfer with Priya</span>
+          <span className="mt-1 block text-xs text-[#616161]">
+            {session.kt?.status === "live" ? "In progress. You can still ask questions." : "On your calendar this morning."}
+          </span>
+        </button>
+      ) : null}
+      <ul className="space-y-2">
+        {recent.map((message) => (
+          <li key={message.id}>
+            <button
+              type="button"
+              onClick={() => onOpenChannel(message.channel)}
+              className="flex w-full items-start gap-2 rounded-md border border-[#e1e1e1] bg-white p-3 text-left hover:border-[#6264A7]"
+            >
+              <Avatar id={message.author === "player" ? "player" : message.author} name={message.authorName} />
+              <span>
+                <span className="block text-sm font-medium">{message.authorName}</span>
+                <span className="mt-0.5 block text-sm text-[#616161]">{message.body.slice(0, 140)}</span>
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -615,7 +1017,7 @@ function Workbench({
         <div>
           <h2 className="font-serif text-2xl">Workbench</h2>
           <p className="text-sm text-muted">Your writable database. Landing tables are read-only. Engine errors are unchanged.</p>
-          {notice ? <p className="mt-1 max-w-xl text-xs text-muted">{notice}</p> : null}
+          {notice ? <SystemNote className="mt-2 max-w-xl text-xs">{notice}</SystemNote> : null}
         </div>
         <Button onClick={onRun} disabled={running || sql.trim().length === 0}>
           <Play className="h-3.5 w-3.5" />
@@ -878,7 +1280,7 @@ function PipelinePane({
   );
 }
 
-function Week({ session }: { session: Session }) {
+function Week({ session, onJoin, onOpen }: { session: Session; onJoin: () => void; onOpen: () => void }) {
   const now = simParts(session.simNow);
   const days = ["Mon", "Tue", "Wed", "Thu", "Fri"];
   const events = useMemo(
@@ -895,13 +1297,27 @@ function Week({ session }: { session: Session }) {
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="font-serif text-2xl">Week of June 3</h2>
-        <p className="text-sm text-muted">
+        <h2 className="text-2xl font-semibold">Week of June 3</h2>
+        <SystemNote className="mt-2">
           Marlow runs on Pacific time. Opening this week doesn&apos;t spend a meeting. The clock advances while you work and pauses after a quiet stretch.
           {session.clockPaused ? " It is paused now." : ""}{" "}
           {session.pipeline.enabled ? `The daily pipeline is set for ${scheduleLabel}.` : "The daily pipeline is off until steps are saved."}
-        </p>
+        </SystemNote>
       </div>
+      <section className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#e1e1e1] bg-white p-4">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-[#464EB8]">Monday 9:00 AM</p>
+          <h3 className="text-lg font-semibold">Knowledge transfer</h3>
+          <p className="text-sm text-[#616161]">Priya Shah · company, project, data, your role, and the first week.</p>
+        </div>
+        {session.kt?.status === "done" ? (
+          <Button variant="outline" onClick={onOpen}>Open transcript</Button>
+        ) : session.kt?.status === "live" ? (
+          <Button onClick={onOpen}>Back to the meeting</Button>
+        ) : (
+          <Button onClick={onJoin}>Join knowledge transfer</Button>
+        )}
+      </section>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
         {days.map((day, index) => {
           const active = now?.weekday.startsWith(day);
@@ -1151,6 +1567,7 @@ function TicketDialog({
                 <Prose text={ticket.lastVerdict.summary} className="mt-1" />
               </section>
             ) : null}
+            <SystemNote>Submit for verdict asks the person who owns the ticket. It is not a model review, and it does not lock the database.</SystemNote>
             {ticket.id !== "definition" ? (
               <Button
                 disabled={busy}

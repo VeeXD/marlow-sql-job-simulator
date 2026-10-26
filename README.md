@@ -47,7 +47,7 @@ npm test
 ## What you can do in the desk
 
 1. Put your name on the offer and pick Guided or Standard. The only industry is e-commerce.
-2. Read Priya's welcome. Jonah's schema walkthrough and the kickoff follow on the simulated clock (about a quarter of a real minute at the default speed).
+2. Read Priya's welcome, then join the knowledge transfer on the calendar. Jonah's schema walkthrough and the kickoff follow on the simulated clock (about a quarter of a real minute at the default speed).
 3. Open the ERD from any screen. Credentials live under Connections. Test connection runs `SELECT current_user`.
 4. Work the board. Tickets appear when the story releases them. MO-2 stays closed until you ask Priya, in your own words, whether refunded or cancelled orders belong in the clean table.
 5. Run SQL in the workbench. Postgres errors come back with the engine message, code, detail, hint, and position. Statements that would write the landing zone are rejected before they run. Read statements are capped inside the SQL (`LIMIT` of the cap plus one, then the extra row is dropped) so Postgres does not return the rest of the result. A statement timeout cancels the query. Opening a desk requires the practice-mode notice.

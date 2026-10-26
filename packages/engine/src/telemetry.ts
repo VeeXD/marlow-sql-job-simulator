@@ -31,6 +31,10 @@ export const TELEMETRY_EVENTS: TelemetryEventName[] = [
   "project_completed",
   "next_project_chosen",
   "session_abandoned",
+  "kt_joined",
+  "kt_topic_covered",
+  "kt_question",
+  "kt_completed",
 ];
 
 /** Consequences change how people talk to you. They never close a tool. */
