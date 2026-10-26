@@ -1,0 +1,57 @@
+# Render blueprint. Review and apply from the dashboard. This file does not deploy by itself.
+# The DATABASE_URL role must be allowed to CREATE DATABASE and CREATE ROLE.
+# See README "Deploy".
+
+databases:
+  - name: marlow-postgres
+    databaseName: marlow
+    user: marlow
+    plan: basic-256mb
+    postgresMajorVersion: "16"
+
+services:
+  - type: redis
+    name: marlow-redis
+    plan: starter
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []
+
+  - type: web
+    name: marlow
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    releaseCommand: npm run release
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: marlow-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: marlow-redis
+          property: connectionString
+      - key: LLM_PROVIDER
+        value: mock
+      - key: NODE_ENV
+        value: production
+      - key: ALLOW_SIGNALS_PAGE
+        value: "false"
+      - key: ALLOW_DEBUG_CLOCK
+        value: "false"
+      - key: ENABLE_WORKER
+        value: "true"
+      - key: PUBLIC_PG_HOST
+        fromDatabase:
+          name: marlow-postgres
+          property: host
+      - key: PUBLIC_PG_PORT
+        fromDatabase:
+          name: marlow-postgres
+          property: port
+      - key: LLM_API_KEY
+        sync: false
+      - key: SESSION_TOKEN_SECRET
+        generateValue: true

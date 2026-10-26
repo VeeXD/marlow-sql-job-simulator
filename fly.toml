@@ -1,0 +1,40 @@
+# Fly.io alternative to render.yaml. Not deployed.
+# Create Postgres and Redis yourself, then:
+#   fly apps create marlow-sql-job-simulator
+#   fly secrets set DATABASE_URL=... REDIS_URL=... SESSION_TOKEN_SECRET=...
+# The DATABASE_URL role needs CREATEDB and CREATEROLE. See README "Deploy".
+
+app = "marlow-sql-job-simulator"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 3847
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "40s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/api/health"
+
+[env]
+  PORT = "3847"
+  WEB_PORT = "3847"
+  WEB_INTERNAL_PORT = "3846"
+  API_PORT = "3848"
+  NODE_ENV = "production"
+  LLM_PROVIDER = "mock"
+  ALLOW_SIGNALS_PAGE = "false"
+  ALLOW_DEBUG_CLOCK = "false"
+  ENABLE_WORKER = "true"
+
+# Runs migrations and rebuilds marlow_template before the new machine takes traffic.
+[deploy]
+  release_command = "npm run release"

@@ -1,7 +1,7 @@
 import http from "node:http";
 import httpProxy from "http-proxy";
 
-const port = Number(process.env.WEB_PORT ?? 3847);
+const port = Number(process.env.PORT ?? process.env.WEB_PORT ?? 3847);
 const web = `http://127.0.0.1:${process.env.WEB_INTERNAL_PORT ?? 3846}`;
 const api = `http://127.0.0.1:${process.env.API_PORT ?? 3848}`;
 const proxy = httpProxy.createProxyServer({ ws: true, xfwd: true });

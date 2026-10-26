@@ -16,6 +16,7 @@
     "test:e2e": "npm run test:e2e -w @sim/server",
     "probe": "npm run probe -w @sim/engine",
     "seed": "npm run seed -w @sim/server",
+    "release": "npm run seed -w @sim/server",
     "typecheck": "npm run typecheck -w @sim/engine && npm run typecheck -w @sim/server && npm run typecheck -w @sim/web"
   },
   "engines": {

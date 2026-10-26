@@ -439,6 +439,7 @@ export function Workplace() {
               provider={session.llmProvider}
               onSubmit={() => void sendChat("meeting:kt")}
               hideHeader
+              layout="transcript"
             />
           </TabsContent>
 
@@ -496,8 +497,8 @@ export function Workplace() {
             </div>
         </Tabs>
 
-        <footer className="flex items-center justify-between gap-3 border-t border-[#e1e1e1] bg-white px-3 py-1.5">
-          <SystemNote className="py-1 text-xs">Standing can fall and recover. It never locks a person or a table.</SystemNote>
+        <footer className="flex items-center justify-end gap-3 border-t border-[#e1e1e1] bg-white py-1.5 pl-16 pr-3">
+          <SystemNote className="mr-auto py-1 text-xs">Standing can fall and recover. It never locks a person or a table.</SystemNote>
           <span className="flex items-center gap-3 text-xs">
             {session.signalsPage ? (
               <Link href="/signals" className="text-[#464EB8] underline">
@@ -670,7 +671,64 @@ function persistSeen(sessionId: string, seen: Set<string>) {
   sessionStorage.setItem(`marlow.seen.${sessionId}`, JSON.stringify([...seen]));
 }
 
-function Thread({ sessionId, messages }: { sessionId: string; messages: ChatMessage[] }) {
+function topicOf(message: ChatMessage): string | null {
+  const match = /^kt_([a-z0-9]+)(?:_more)?$/.exec(message.intent);
+  return match ? match[1] : null;
+}
+
+function groupTurns(messages: ChatMessage[]) {
+  const turns: {
+    id: string;
+    authorName: string;
+    atSim: string;
+    topic: string | null;
+    bodies: string[];
+    reaction?: string;
+    mine: boolean;
+  }[] = [];
+  for (const message of messages) {
+    const topic = topicOf(message);
+    const mine = message.author === "player";
+    const last = turns.at(-1);
+    if (last && !mine && !last.mine && last.authorName === message.authorName && topic && topic === last.topic) {
+      last.bodies.push(message.body);
+      if (!last.reaction && message.reaction) last.reaction = message.reaction;
+      continue;
+    }
+    turns.push({
+      id: message.id,
+      authorName: message.authorName,
+      atSim: message.atSim,
+      topic,
+      bodies: [message.body],
+      reaction: message.reaction,
+      mine,
+    });
+  }
+  return turns;
+}
+
+function Transcript({ messages }: { messages: ChatMessage[] }) {
+  const turns = groupTurns(messages);
+  return (
+    <div className="divide-y divide-[#e1e1e1] bg-white">
+      {turns.map((turn) => (
+        <article key={turn.id} className="grid grid-cols-1 gap-1 px-4 py-3 sm:grid-cols-[7.5rem_1fr] sm:gap-4">
+          <time className="text-xs text-[#616161] sm:pt-0.5">{formatSim(turn.atSim)}</time>
+          <div>
+            <p className={`text-sm font-semibold ${turn.mine ? "text-[#242424]" : "text-[#464EB8]"}`}>{turn.authorName}</p>
+            <Prose text={turn.bodies.join(" ")} className="mt-1 text-sm leading-7 text-[#242424]" />
+            {turn.reaction ? (
+              <span className="mt-2 inline-flex rounded-full border border-[#e1e1e1] bg-[#f5f5f5] px-1.5 text-xs">{turn.reaction}</span>
+            ) : null}
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function Thread({ sessionId, messages, layout = "bubbles" }: { sessionId: string; messages: ChatMessage[]; layout?: "bubbles" | "transcript" }) {
   const queue = useRef<ChatMessage[]>([]);
   const playing = useRef(false);
   const alive = useRef(true);
@@ -745,14 +803,16 @@ function Thread({ sessionId, messages }: { sessionId: string; messages: ChatMess
   const seen = rememberSeen(sessionId);
   const visible = messages.filter((message) => message.author === "player" || (seen.has(message.id) && !hidden.has(message.id)));
   return (
-    <div ref={box} className="min-h-0 flex-1 overflow-y-auto">
-      <div className="space-y-3 p-3 sm:p-4">
+    <div ref={box} className={`min-h-0 flex-1 overflow-y-auto ${layout === "transcript" ? "bg-white" : ""}`}>
+      <div className={layout === "transcript" ? "" : "space-y-3 p-3 sm:p-4"}>
         {visible.length === 0 && !typingName ? (
           <SystemNote>Nothing in this thread yet. The clock moves while you work, then pauses if you go quiet.</SystemNote>
         ) : null}
-        {visible.map((message) => (
-          <MessageBubble key={message.id} message={message} />
-        ))}
+        {layout === "transcript" ? (
+          <Transcript messages={visible} />
+        ) : (
+          visible.map((message) => <MessageBubble key={message.id} message={message} />)
+        )}
         {typingName ? (
           <p className="flex items-center gap-2 text-xs text-[#616161]">
             <span className="flex gap-1">
@@ -779,6 +839,7 @@ function Conversation({
   provider,
   onSubmit,
   hideHeader = false,
+  layout = "bubbles",
 }: {
   sessionId: string;
   title: string;
@@ -790,6 +851,7 @@ function Conversation({
   provider: string;
   onSubmit: () => void;
   hideHeader?: boolean;
+  layout?: "bubbles" | "transcript";
 }) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#f5f5f5]">
@@ -798,7 +860,7 @@ function Conversation({
           <p className="text-sm font-semibold">{title}</p>
         </div>
       )}
-      <Thread sessionId={sessionId} messages={messages} />
+      <Thread sessionId={sessionId} messages={messages} layout={layout} />
       <form
         className="border-t border-[#e1e1e1] bg-white p-3"
         onSubmit={(event) => {

@@ -18,6 +18,28 @@ Postgres is published on `localhost:5432` (`sim` / `sim`, database `sim`). The c
 
 The first request creates `marlow_template` and clones it into `sandbox_<id>` owned by `player_<id>`. Landing tables are readable. The player role can create objects in `public` and cannot write `raw_orders` or `raw_events`.
 
+## Deploy
+
+Nothing in this repo has been deployed. `render.yaml` and `fly.toml` are blueprints you apply yourself.
+
+The public process is the proxy. It listens on `PORT`, then `WEB_PORT`, then 3847. `/api/health` returns `{ "ok": true, "llm": "<provider>" }` and is the Docker `HEALTHCHECK`, the Render health check, and the Fly check.
+
+`npm run release` waits for Postgres, runs the app migrations, and rebuilds `marlow_template`. Render's `releaseCommand` and Fly's `release_command` call it before traffic moves. The server does the same work again on boot (`ensureTemplate` without forcing a rebuild when the seed version is unchanged), so a platform with no release phase still comes up.
+
+`LLM_PROVIDER` defaults to `mock`. A mock deploy needs no model key. Set `openai` or `anthropic` plus `LLM_API_KEY` when you want live wording. `DATABASE_URL` is the app database (sessions and telemetry). `REDIS_URL` is the BullMQ and reply cache. Leave `ENABLE_WORKER=true` when Redis is there. The production image sets `ALLOW_SIGNALS_PAGE=false` and `ALLOW_DEBUG_CLOCK=false`. The full list is in `.env.example`.
+
+### Sandbox databases on managed Postgres
+
+Each session runs `CREATE DATABASE sandbox_<id> TEMPLATE marlow_template` and `CREATE ROLE player_<id> LOGIN`. Both statements use the role in `DATABASE_URL`, so that role needs `CREATEDB` and `CREATEROLE` on the cluster:
+
+```sql
+ALTER ROLE marlow CREATEDB CREATEROLE;
+```
+
+A managed role that can only use the one database it was given cannot clone a sandbox. Render's database user and a Fly Postgres admin user can be granted those attributes. The player role created for the sandbox is `NOCREATEDB`. Existing sandboxes are not dropped when a release rebuilds the template.
+
+`PUBLIC_PG_HOST` and `PUBLIC_PG_PORT` are what the connection manager shows. Point them at a host the player can actually reach. An internal-only address (Fly 6PN, a private Render host) works for the app and fails from a laptop.
+
 ## Run without Docker
 
 You need Node 22, Postgres 16, and Redis.
