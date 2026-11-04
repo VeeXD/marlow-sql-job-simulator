@@ -51,7 +51,7 @@ export async function ensureTemplate(force = false): Promise<void> {
   const exists = await pool.query(`SELECT 1 FROM pg_database WHERE datname = 'marlow_template'`);
   if (exists.rowCount && meta.rows[0]?.value === String(seed.version) && !force) return;
   if (exists.rowCount) {
-    await pool.query(`UPDATE pg_database SET datallowconn = true WHERE datname = 'marlow_template'`);
+    await pool.query(`ALTER DATABASE marlow_template ALLOW_CONNECTIONS true`);
     await pool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'marlow_template' AND pid <> pg_backend_pid()`,
     );
@@ -65,7 +65,7 @@ export async function ensureTemplate(force = false): Promise<void> {
   } finally {
     await client.end();
   }
-  await pool.query(`UPDATE pg_database SET datallowconn = false WHERE datname = 'marlow_template'`);
+  await pool.query(`ALTER DATABASE marlow_template ALLOW_CONNECTIONS false`);
   await pool.query(
     `INSERT INTO app_meta (key, value) VALUES ('seed_version', $1)
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
@@ -84,12 +84,12 @@ export async function cloneSandbox(sessionId: string): Promise<SandboxHandle> {
   try {
     await pool.query(`CREATE DATABASE ${sandboxDb} TEMPLATE marlow_template`);
   } catch {
-    await pool.query(`UPDATE pg_database SET datallowconn = true WHERE datname = 'marlow_template'`);
+    await pool.query(`ALTER DATABASE marlow_template ALLOW_CONNECTIONS true`);
     await pool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'marlow_template' AND pid <> pg_backend_pid()`,
     );
     await pool.query(`CREATE DATABASE ${sandboxDb} TEMPLATE marlow_template`);
-    await pool.query(`UPDATE pg_database SET datallowconn = false WHERE datname = 'marlow_template'`);
+    await pool.query(`ALTER DATABASE marlow_template ALLOW_CONNECTIONS false`);
   }
   const client = clientFor(sandboxDb);
   try {
