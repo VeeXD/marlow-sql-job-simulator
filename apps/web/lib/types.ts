@@ -91,6 +91,7 @@ export type Session = {
   calendar?: CalendarMeeting[];
   waiting?: { channel: string; authorName: string; remaining: number }[];
   tour?: TourState;
+  notebook?: { cells: { id: string; source: string }[] };
   tickets: Ticket[];
   onboarding: { welcome: boolean; walkthrough: boolean; kickoff: boolean };
   kt: { status: "scheduled" | "live" | "done"; topicsCovered: string[]; questionsAsked: number };

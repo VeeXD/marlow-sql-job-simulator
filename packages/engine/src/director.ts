@@ -145,6 +145,22 @@ function ticket(
   };
 }
 
+export function defaultNotebook(): SessionState["notebook"] {
+  return {
+    cells: [
+      {
+        id: "cell-1",
+        source:
+          'df = sql("SELECT * FROM raw_orders LIMIT 20")\ndf.describe()',
+      },
+      {
+        id: "cell-2",
+        source: 'write_table(df.head(10), "order_sample")\n"saved order_sample"',
+      },
+    ],
+  };
+}
+
 export function createInitialState(input: {
   playerName: string;
   difficulty: Difficulty;
@@ -176,6 +192,7 @@ export function createInitialState(input: {
       status: (input.tour ?? input.difficulty === "guided") ? "active" : "off",
       step: (input.tour ?? input.difficulty === "guided") ? "chat" : null,
     },
+    notebook: defaultNotebook(),
     tickets: [
       ticket({
         id: "explore",
@@ -1064,6 +1081,7 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
       step: state.difficulty === "guided" ? "chat" : null,
     };
   }
+  if (!state.notebook?.cells?.length) state.notebook = defaultNotebook();
   const effects: Effect[] = [];
   if (state.abandoned && event.type !== "start") {
     return { state, effects, error: "This project was abandoned." };
@@ -1079,6 +1097,7 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
       "react",
       "tour",
       "ack_meeting",
+      "save_notebook",
     ]);
     const cohortSubmit =
       event.type === "submit" && event.ticketId === "cohort" && state.cohort.active && !state.cohort.completed;
@@ -1675,6 +1694,17 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
         effects.push({ type: "telemetry", name: "tour_started", payload: { auto: false, step } });
       }
       effects.push({ type: "telemetry", name: "tour_step", payload: { step, surface: "desk" } });
+      break;
+    }
+    case "save_notebook": {
+      if (event.cells.length > 40) return { state: input, effects: [], error: "Too many notebook cells." };
+      state.notebook = {
+        cells: event.cells.map((cell, index) => ({
+          id: cell.id.trim().slice(0, 40) || `cell-${index + 1}`,
+          source: cell.source.slice(0, 20_000),
+        })),
+      };
+      if (state.notebook.cells.length === 0) state.notebook = defaultNotebook();
       break;
     }
     case "abandon": {

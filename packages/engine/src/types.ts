@@ -83,6 +83,11 @@ export type TourState = {
   step: string | null;
 };
 
+export type NotebookCell = {
+  id: string;
+  source: string;
+};
+
 export type TicketState = {
   id: string;
   key: string;
@@ -196,6 +201,7 @@ export type SessionState = {
   explained: string[];
   meetings: { kt: "scheduled" | "joined" | "missed"; standup: "scheduled" | "acked" | "missed" };
   tour: TourState;
+  notebook: { cells: NotebookCell[] };
   tickets: TicketState[];
   queriedTables: string[];
   hidden: { orderDefinitionUnlocked: boolean };
@@ -273,7 +279,10 @@ export type TelemetryEventName =
   | "tour_skipped"
   | "tour_completed"
   | "tour_replayed"
-  | "glossary_viewed";
+  | "glossary_viewed"
+  | "table_previewed"
+  | "column_profiled"
+  | "notebook_cell_run";
 
 export type SpeakEffect = {
   type: "speak";
@@ -320,7 +329,8 @@ export type DirectorEvent =
   | { type: "complete_kt" }
   | { type: "react"; messageId: string; emoji: string }
   | { type: "ack_meeting"; meetingId: string }
-  | { type: "tour"; action: "start" | "step" | "skip" | "complete" | "replay"; step?: string };
+  | { type: "tour"; action: "start" | "step" | "skip" | "complete" | "replay"; step?: string }
+  | { type: "save_notebook"; cells: { id: string; source: string }[] };
 
 export type ReduceResult = {
   state: SessionState;

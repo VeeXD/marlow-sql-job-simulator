@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { DESK_TOUR_IDS, type DeskTourId } from "@sim/engine/tour";
 import { Button } from "@/components/ui/button";
 
 export type TourStep = {
@@ -37,62 +38,65 @@ export const SETUP_STEPS: TourStep[] = [
   },
 ];
 
-export const DESK_STEPS: TourStep[] = [
-  {
-    id: "chat",
+const DESK_COPY: Record<DeskTourId, Omit<TourStep, "id">> = {
+  chat: {
     target: "tour-chat",
     title: "Chat",
     body: "Priya writes like a person, not a memo. Messages arrive one at a time, with a typing indicator. Reply when you're ready. She waits instead of posting a wall.",
   },
-  {
-    id: "kt",
+  kt: {
     target: "tour-kt",
     title: "Priya's knowledge transfer",
     body: "The knowledge transfer is a short meeting on your calendar. Join it, then let Priya take it one point at a time. Say go on for the next point, or ask a question in your own words.",
   },
-  {
-    id: "calendar",
+  calendar: {
     target: "tour-calendar",
     title: "Calendar",
     body: "Meetings live here. Ten minutes before, and again one minute before, you get a yellow system note, a toast, and a badge on Calendar. Join is on the note. A missed meeting is noted. Nothing locks.",
   },
-  {
-    id: "board",
+  board: {
     target: "tour-board",
     title: "The board and MO-1",
     body: "Work arrives as tickets, like a Jira board. MO-1 is Explore the landing zone. Open it and read what done means. It shows up after Priya's kickoff, a few simulated minutes in.",
   },
-  {
-    id: "connections",
+  connections: {
     target: "tour-connections",
     title: "Connection manager",
-    body: "Connections holds your Postgres login. You can test it. You can read the landing tables and create new tables. You cannot rewrite the raw files.",
+    body: "Connections holds your Postgres login and the schema browser. You can test the login. You can read the landing tables and create new tables. You cannot rewrite the raw files.",
   },
-  {
-    id: "workbench",
+  preview: {
+    target: "tour-preview",
+    title: "Preview and profile",
+    body: "Click a table. Preview shows the first 100 rows, a page at a time, and stops at the 500-row cap. Profile shows nulls, distinct counts, min and max, and a small histogram. Raw tables stay read-only.",
+  },
+  workbench: {
     target: "tour-workbench",
     title: "SQL workbench",
     body: "This is where you write SQL. The editor is a normal query box. Errors come back from Postgres, in Postgres's own words.",
   },
-  {
-    id: "run-query",
+  notebook: {
+    target: "tour-notebook",
+    title: "Python notebook",
+    body: "The notebook loads Python in this browser the first time you open it. df = sql(\"select ...\") uses your player role. write_table(df, 'name') saves a table in your schema, never the raw files. describe() summarizes a DataFrame.",
+  },
+  "run-query": {
     target: "tour-run",
     title: "Run a query",
     body: "Run the count on raw_orders. Then run one against raw_events. MO-1 is done when both have succeeded. You can click Run while this card stays up.",
   },
-  {
-    id: "submit",
-    target: "tour-mo1",
+  submit: {
+    target: "tour-submit",
     title: "Submit the ticket",
-    body: "Open MO-1 and choose Submit for verdict. That asks Priya to check the rule on the ticket. It does not lock the database, and you can try again.",
+    body: "MO-1 is open. Choose Submit for verdict. That asks Priya to check the rule on the ticket. It does not lock the database, and you can try again.",
   },
-  {
-    id: "feedback",
+  feedback: {
     target: "tour-verdict",
     title: "Grading feedback",
     body: "Priya's verdict shows on the ticket and in her chat. A pass says what held. A miss says what is still wrong, not the query to paste.",
   },
-];
+};
+
+export const DESK_STEPS: TourStep[] = DESK_TOUR_IDS.map((id) => ({ id, ...DESK_COPY[id] }));
 
 export function TourLayer({
   steps,

@@ -13,6 +13,11 @@ import {
   openTicket,
   postChat,
   postQuery,
+  previewTable,
+  profileTable,
+  saveNotebook,
+  recordNotebookRun,
+  writeNotebookTable,
   joinKt,
   completeKt,
   postReact,
@@ -115,8 +120,8 @@ export async function buildApp() {
 
   app.post("/api/sessions/:id/query", async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const body = z.object({ sql: z.string().min(1).max(100_000) }).parse(request.body);
-    return postQuery(id, tokenFrom(request.headers.authorization), body.sql);
+    const body = z.object({ sql: z.string().min(1).max(100_000), notebook: z.boolean().optional() }).parse(request.body);
+    return postQuery(id, tokenFrom(request.headers.authorization), body.sql, { notebook: body.notebook === true });
   });
 
   app.post("/api/sessions/:id/tickets/:ticketId/open", async (request) => {
@@ -173,6 +178,58 @@ export async function buildApp() {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z.object({ advanceMinutes: z.number().int().min(0).max(24 * 60) }).parse(request.body);
     return advanceClock(id, tokenFrom(request.headers.authorization), body.advanceMinutes);
+  });
+
+  app.get("/api/sessions/:id/tables/:table/preview", async (request) => {
+    const params = z.object({ id: z.string().uuid(), table: z.string().min(1).max(63) }).parse(request.params);
+    const query = z
+      .object({
+        sort: z.string().max(63).optional(),
+        dir: z.enum(["asc", "desc"]).optional(),
+        offset: z.coerce.number().int().min(0).max(500).optional(),
+      })
+      .parse(request.query);
+    return previewTable(params.id, tokenFrom(request.headers.authorization), params.table, query);
+  });
+
+  app.get("/api/sessions/:id/tables/:table/profile", async (request) => {
+    const params = z.object({ id: z.string().uuid(), table: z.string().min(1).max(63) }).parse(request.params);
+    return profileTable(params.id, tokenFrom(request.headers.authorization), params.table);
+  });
+
+  app.put("/api/sessions/:id/notebook", async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        cells: z.array(z.object({ id: z.string().min(1).max(40), source: z.string().max(20_000) })).max(40),
+      })
+      .parse(request.body);
+    return saveNotebook(id, tokenFrom(request.headers.authorization), body.cells);
+  });
+
+  app.post("/api/sessions/:id/notebook/run", async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        cellId: z.string().min(1).max(40),
+        ok: z.boolean(),
+        callsSql: z.boolean(),
+        callsWrite: z.boolean(),
+      })
+      .parse(request.body);
+    return recordNotebookRun(id, tokenFrom(request.headers.authorization), body);
+  });
+
+  app.post("/api/sessions/:id/notebook/write", { bodyLimit: 20 * 1024 * 1024 }, async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        name: z.string().min(1).max(63),
+        columns: z.array(z.object({ name: z.string().min(1).max(63), dtype: z.string().min(1).max(40) })).min(1).max(40),
+        rows: z.array(z.array(z.unknown())).max(50_000),
+      })
+      .parse(request.body);
+    return writeNotebookTable(id, tokenFrom(request.headers.authorization), body);
   });
 
   app.post("/api/sessions/:id/connection/test", async (request) => {

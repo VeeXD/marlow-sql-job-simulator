@@ -15,6 +15,7 @@ import {
   calendarView,
   contentHash,
   createInitialState,
+  NOTEBOOK_ROW_CAP,
   glossaryEntry,
   createProviderFromEnv,
   dailySlotsCrossed,
@@ -40,10 +41,12 @@ import {
   gradeSandbox,
   injectBreak,
   introspect,
-  postgresAdapter,
+  previewPlayerTable,
+  profilePlayerTable,
   runPlayerQuery,
   runSavedPipeline,
   touched,
+  writePlayerTable,
   type SandboxHandle,
 } from "./sandbox.js";
 
@@ -139,6 +142,7 @@ function hydrateState(raw: SessionState): SessionState {
     explained: raw.explained ?? [],
     meetings: raw.meetings ?? { kt: "scheduled", standup: "scheduled" },
     tour: raw.tour ?? fresh.tour,
+    notebook: raw.notebook?.cells?.length ? raw.notebook : fresh.notebook,
   };
   if (!state.tickets.some((ticket) => ticket.id === "cohort")) {
     const cohort = fresh.tickets.find((ticket) => ticket.id === "cohort");
@@ -359,6 +363,7 @@ export function toDto(session: SessionRow) {
     calendar: calendarView(state),
     waiting: waitingOn(state),
     tour: state.tour ?? { status: state.difficulty === "guided" ? "active" : "off", step: state.difficulty === "guided" ? "chat" : null },
+    notebook: state.notebook ?? { cells: [] },
     tickets: state.tickets
       .filter((ticket) => ticket.released)
       .map(({ hiddenEvaluation: _hidden, ...ticket }) => ticket),
@@ -508,6 +513,69 @@ export async function ackMeeting(id: string, token: string, meetingId: string) {
   });
 }
 
+export async function previewTable(id: string, token: string, table: string, opts: { sort?: string; dir?: "asc" | "desc"; offset?: number }) {
+  return withSession(id, token, async (ctx) => {
+    await touch(ctx);
+    const preview = await previewPlayerTable(ctx.session, table, opts);
+    if ("error" in preview) throw new HttpError(400, preview.error ?? "Could not preview the table.");
+    await writeTelemetry(ctx, "table_previewed", {
+      table,
+      offset: preview.offset,
+      sort: preview.sort,
+      rows: preview.rows.length,
+    });
+    return preview;
+  });
+}
+
+export async function profileTable(id: string, token: string, table: string) {
+  return withSession(id, token, async (ctx) => {
+    await touch(ctx);
+    const profile = await profilePlayerTable(ctx.session, table);
+    if ("error" in profile) throw new HttpError(400, profile.error ?? "Could not profile the table.");
+    await writeTelemetry(ctx, "column_profiled", {
+      table,
+      columns: profile.columns.map((column) => column.name),
+    });
+    return profile;
+  });
+}
+
+export async function saveNotebook(id: string, token: string, cells: { id: string; source: string }[]) {
+  return withSession(id, token, async (ctx) => {
+    await touch(ctx);
+    await dispatch(ctx, { type: "save_notebook", cells });
+    return toDto(ctx.session);
+  });
+}
+
+export async function recordNotebookRun(
+  id: string,
+  token: string,
+  body: { cellId: string; ok: boolean; callsSql: boolean; callsWrite: boolean },
+) {
+  return withSession(id, token, async (ctx) => {
+    await touch(ctx);
+    await writeTelemetry(ctx, "notebook_cell_run", body);
+    return { ok: true };
+  });
+}
+
+export async function writeNotebookTable(
+  id: string,
+  token: string,
+  body: { name: string; columns: { name: string; dtype: string }[]; rows: unknown[][] },
+) {
+  return withSession(id, token, async (ctx) => {
+    await touch(ctx);
+    try {
+      return await writePlayerTable(ctx.session, body.name, body.columns, body.rows);
+    } catch (err) {
+      throw new HttpError(400, err instanceof Error ? err.message : "Could not write that table.");
+    }
+  });
+}
+
 export async function postChat(id: string, token: string, channel: string, body: string) {
   return withSession(id, token, async (ctx) => {
     const previousActivity = ctx.session.state.lastActivityAt;
@@ -518,10 +586,10 @@ export async function postChat(id: string, token: string, channel: string, body:
   });
 }
 
-export async function postQuery(id: string, token: string, sql: string) {
+export async function postQuery(id: string, token: string, sql: string, opts?: { notebook?: boolean }) {
   return withSession(id, token, async (ctx) => {
     await touch(ctx);
-    const result = await postgresAdapter(ctx.session).run(sql);
+    const result = await runPlayerQuery(ctx.session, sql, opts?.notebook ? NOTEBOOK_ROW_CAP : config.rowCap);
     const rowsReturned = result.statements.reduce((count, statement) => count + statement.rows.length, 0);
     await dispatch(ctx, {
       type: "query",

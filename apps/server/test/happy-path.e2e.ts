@@ -109,6 +109,46 @@ describe("project 1 happy path", () => {
       method: "POST",
       body: JSON.stringify({ sql: "SELECT COUNT(*) FROM raw_orders" }),
     });
+    const preview = await api(`/api/sessions/${created.id}/tables/raw_orders/preview?offset=0`, token);
+    expect(preview.columns).toContain("order_id");
+    expect(preview.rows.length).toBeGreaterThan(0);
+    expect(preview.rows.length).toBeLessThanOrEqual(100);
+    expect(preview.readOnly).toBe(true);
+    const profile = await api(`/api/sessions/${created.id}/tables/raw_orders/profile`, token);
+    const amount = profile.columns.find((column: { name: string }) => column.name === "amount_cents");
+    expect(amount.distinct).toBeGreaterThan(0);
+    expect(amount.histogram.length).toBeGreaterThan(0);
+    const wide = await api(`/api/sessions/${created.id}/query`, token, {
+      method: "POST",
+      body: JSON.stringify({ sql: "SELECT generate_series(1, 800) AS n", notebook: true }),
+    });
+    expect(wide.result.statements[0].rows).toHaveLength(800);
+    const written = await api(`/api/sessions/${created.id}/notebook/write`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "order_sample",
+        columns: [
+          { name: "order_id", dtype: "int64" },
+          { name: "note", dtype: "object" },
+        ],
+        rows: [[1, "hello"]],
+      }),
+    });
+    expect(written.table).toBe("order_sample");
+    await expect(
+      api(`/api/sessions/${created.id}/notebook/write`, token, {
+        method: "POST",
+        body: JSON.stringify({
+          name: "raw_orders",
+          columns: [{ name: "order_id", dtype: "int64" }],
+          rows: [[1]],
+        }),
+      }),
+    ).rejects.toThrow(/read-only/);
+    await api(`/api/sessions/${created.id}/notebook/run`, token, {
+      method: "POST",
+      body: JSON.stringify({ cellId: "cell-1", ok: true, callsSql: true, callsWrite: false }),
+    });
     const explored = await api(`/api/sessions/${created.id}/query`, token, {
       method: "POST",
       body: JSON.stringify({ sql: "SELECT COUNT(*) FROM raw_events" }),
@@ -243,6 +283,9 @@ ALTER TABLE repeat_cohorts ADD PRIMARY KEY (customer_id);`,
       "pressure_window_start",
       "pressure_window_end",
       "schema_explored",
+      "table_previewed",
+      "column_profiled",
+      "notebook_cell_run",
       "message_sent",
       "deadline_event",
     ]) {

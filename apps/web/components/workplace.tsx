@@ -30,6 +30,8 @@ import {
 } from "@/lib/types";
 import { DESK_STEPS, TourLayer } from "@/components/tour-layer";
 import { GlossaryLogProvider, GlossaryText } from "@/components/glossary-text";
+import { NotebookPane } from "@/components/notebook";
+import { SchemaBrowser } from "@/components/schema-browser";
 import { SystemNote } from "@/components/system-note";
 import { Prose } from "@/components/prose";
 import { SqlEditor } from "@/components/sql-editor";
@@ -56,7 +58,9 @@ export function Workplace() {
   const [banner, setBanner] = useState<string | null>(null);
   sessionRef.current = session;
   const [pane, setPane] = useState<Pane>("chat");
-  const [bench, setBench] = useState<"sql" | "pipeline">("sql");
+  const [bench, setBench] = useState<"sql" | "pipeline" | "notebook">("sql");
+  const [notebookSeen, setNotebookSeen] = useState(false);
+  const [schemaTable, setSchemaTable] = useState<string | null>(null);
   const [channel, setChannel] = useState("dm:priya");
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
@@ -136,7 +140,9 @@ export function Workplace() {
         calendar: "calendar",
         board: "board",
         connections: "board",
+        preview: "board",
         workbench: "workbench",
+        notebook: "workbench",
         "run-query": "workbench",
         submit: "board",
         feedback: "board",
@@ -144,10 +150,18 @@ export function Workplace() {
       const next = paneFor[tourStep];
       if (next) setPane(next);
       if (tourStep === "workbench" || tourStep === "run-query") setBench("sql");
+      if (tourStep === "notebook") {
+        setBench("notebook");
+        setNotebookSeen(true);
+      }
+      if (tourStep === "connections" || tourStep === "preview") {
+        setConnOpen(true);
+        if (tourStep === "preview") setSchemaTable("raw_orders");
+      }
     }
-    if (tourStep === "feedback") {
+    if (tourStep === "submit" || tourStep === "feedback") {
       const explore = session?.tickets.find((item) => item.id === "explore");
-      if (explore?.lastVerdict) setTicket(explore);
+      if (explore) setTicket(explore);
     }
   }, [tourStep, session?.tickets]);
 
@@ -609,7 +623,23 @@ export function Workplace() {
             <div className="mb-3 flex gap-2">
               <Button size="sm" variant={bench === "sql" ? "default" : "outline"} onClick={() => setBench("sql")}>SQL</Button>
               <Button size="sm" variant={bench === "pipeline" ? "default" : "outline"} onClick={() => setBench("pipeline")}>Pipeline</Button>
+              <Button
+                size="sm"
+                data-tour="tour-notebook"
+                variant={bench === "notebook" ? "default" : "outline"}
+                onClick={() => {
+                  setNotebookSeen(true);
+                  setBench("notebook");
+                }}
+              >
+                Notebook
+              </Button>
             </div>
+            {notebookSeen ? (
+              <div className={bench === "notebook" ? "" : "hidden"}>
+                <NotebookPane session={session} active={bench === "notebook"} onSession={(mine, next) => commit(mine || gen.current, next)} />
+              </div>
+            ) : null}
             {bench === "sql" ? (
               <Workbench
                 sql={sql}
@@ -635,7 +665,7 @@ export function Workplace() {
                   }
                 }}
               />
-            ) : (
+            ) : bench === "pipeline" ? (
               <PipelinePane
                 session={session}
                 onError={setBanner}
@@ -650,7 +680,7 @@ export function Workplace() {
                 }
                 run={() => mutate<Session>(`/api/sessions/${session.id}/pipeline/run`, { method: "POST" })}
               />
-            )}
+            ) : null}
           </TabsContent>
 
           <TabsContent value="calendar" className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
@@ -681,9 +711,12 @@ export function Workplace() {
         open={erdOpen}
         onOpenChange={setErdOpen}
         session={session}
-        onPreview={(table) => postSignal({ kind: "table_previewed", table })}
+        onPreview={(table) => {
+          setSchemaTable(table);
+          setConnOpen(true);
+        }}
       />
-      <ConnectionDialog open={connOpen} onOpenChange={setConnOpen} session={session} />
+      <ConnectionDialog open={connOpen} onOpenChange={setConnOpen} session={session} selectedTable={schemaTable} onSelectTable={setSchemaTable} />
       <TicketDialog
         ticket={ticket}
         session={session}
@@ -1845,10 +1878,14 @@ function ConnectionDialog({
   open,
   onOpenChange,
   session,
+  selectedTable,
+  onSelectTable,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   session: Session;
+  selectedTable: string | null;
+  onSelectTable: (table: string) => void;
 }) {
   const [testing, setTesting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -1857,10 +1894,10 @@ function ConnectionDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="w-[min(100%-1.5rem,980px)]">
         <DialogHeader>
           <DialogTitle>Connections</DialogTitle>
-          <DialogDescription>This role can read the landing zone and create objects in public. It is not a superuser.</DialogDescription>
+          <DialogDescription>This role can read the landing zone and create objects in public. It is not a superuser. Click a table to preview or profile it.</DialogDescription>
         </DialogHeader>
         <dl className="grid grid-cols-[8rem_1fr] gap-y-2 text-sm">
           <dt className="text-muted">Engine</dt>
@@ -1914,6 +1951,7 @@ function ConnectionDialog({
           </Button>
         </div>
         {message ? <p className="text-sm">{message}</p> : null}
+        <SchemaBrowser session={session} selected={selectedTable} onSelect={onSelectTable} />
       </DialogContent>
     </Dialog>
   );
@@ -1969,15 +2007,18 @@ function TicketDialog({
                 <Prose text={ticket.coachNotes} surface="ticket" className="mt-1" />
               </section>
             ) : null}
-            {ticket.lastVerdict ? (
-              <section data-tour="tour-verdict" className={`rounded-md p-3 text-sm ${ticket.lastVerdict.passed ? "bg-[#e5f0e6]" : "bg-[#f8e8e4]"}`}>
-                <p className="text-xs uppercase tracking-wide">{ticket.lastVerdict.passed ? "Verdict" : "Sent back"}</p>
+            <section data-tour={ticket.id === "explore" ? "tour-verdict" : undefined} className={`rounded-md p-3 text-sm ${ticket.lastVerdict ? (ticket.lastVerdict.passed ? "bg-[#e5f0e6]" : "bg-[#f8e8e4]") : "border border-dashed border-line"}`}>
+              <p className="text-xs uppercase tracking-wide">{ticket.lastVerdict ? (ticket.lastVerdict.passed ? "Verdict" : "Sent back") : "Verdict"}</p>
+              {ticket.lastVerdict ? (
                 <Prose text={ticket.lastVerdict.summary} surface="ticket" className="mt-1" />
-              </section>
-            ) : null}
+              ) : (
+                <p className="mt-1 text-muted">Submit this ticket and the check shows up here. A pass says what held. A miss says what is still wrong.</p>
+              )}
+            </section>
             <SystemNote>Submit for verdict asks the person who owns the ticket. It is not a model review, and it does not lock the database.</SystemNote>
             {ticket.id !== "definition" ? (
               <Button
+                data-tour={ticket.id === "explore" ? "tour-submit" : undefined}
                 disabled={busy}
                 onClick={async () => {
                   setBusy(true);

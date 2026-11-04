@@ -13,9 +13,22 @@ import {
   runScript,
   schemaDriftSql,
   splitSql,
+  NOTEBOOK_ROW_CAP,
+  PREVIEW_PAGE_SIZE,
   assertSafe,
+  assertWritableTable,
+  bucketLabel,
+  countSql,
+  dropCreateSql,
+  histogramSql,
+  isNumericType,
+  previewSql,
+  previewWindow,
+  quoteIdent,
+  scalarProfileSql,
   stripCommentsAndStrings,
   tablesTouched,
+  topValuesSql,
   type BreakKind,
   type GradeResult,
   type SqlExec,
@@ -170,7 +183,7 @@ export type PlayerQueryResult = {
   } | null;
 };
 
-export async function runPlayerQuery(handle: SandboxHandle, sql: string): Promise<PlayerQueryResult> {
+export async function runPlayerQuery(handle: SandboxHandle, sql: string, rowCap = config.rowCap): Promise<PlayerQueryResult> {
   const started = Date.now();
   const statements = splitSql(sql);
   if (statements.length === 0) {
@@ -201,12 +214,12 @@ export async function runPlayerQuery(handle: SandboxHandle, sql: string): Promis
   try {
     await client.query(`SET statement_timeout = '${config.statementTimeoutMs}ms'`);
     for (const statement of statements) {
-      const capped = applyRowCap(statement, config.rowCap);
+      const capped = applyRowCap(statement, rowCap);
       const rowsScannedEstimate = isReadStatement(statement) ? await estimateScanned(handle, capped.sql) : null;
       try {
         const result = await client.query(capped.sql);
-        const truncated = capped.capApplied && result.rows.length > config.rowCap;
-        const rows = truncated ? result.rows.slice(0, config.rowCap) : result.rows;
+        const truncated = capped.capApplied && result.rows.length > rowCap;
+        const rows = truncated ? result.rows.slice(0, rowCap) : result.rows;
         results.push({
           command: result.command,
           rowCount: truncated ? rows.length : result.rowCount,
@@ -330,6 +343,167 @@ export async function gradeSandbox(
   } finally {
     await client.end();
   }
+}
+
+export type TableColumn = { name: string; dataType: string; nullable: boolean };
+
+async function publicColumns(handle: SandboxHandle, table: string): Promise<TableColumn[]> {
+  const client = clientFor(handle.sandboxDb, handle.sandboxUser, handle.sandboxPassword);
+  await client.connect();
+  try {
+    const result = await client.query(
+      `SELECT column_name, data_type, is_nullable
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = $1
+       ORDER BY ordinal_position`,
+      [table],
+    );
+    return result.rows.map((row) => ({
+      name: String(row.column_name),
+      dataType: String(row.data_type),
+      nullable: row.is_nullable === "YES",
+    }));
+  } finally {
+    await client.end();
+  }
+}
+
+function asNumber(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+export async function previewPlayerTable(
+  handle: SandboxHandle,
+  table: string,
+  opts: { sort?: string; dir?: "asc" | "desc"; offset?: number },
+) {
+  const columns = await publicColumns(handle, table);
+  if (columns.length === 0) {
+    return { error: "That table is not in your database yet." };
+  }
+  const sort = opts.sort && columns.some((column) => column.name === opts.sort) ? opts.sort : columns[0].name;
+  const window = previewWindow(opts.offset ?? 0, PREVIEW_PAGE_SIZE);
+  const counted = await runPlayerQuery(handle, countSql(table));
+  if (!counted.ok) return { error: counted.error?.message ?? "Could not count the table." };
+  const total = Number(counted.statements[0]?.rows[0]?.n ?? 0);
+  const preview = await runPlayerQuery(handle, previewSql(table, { sort, dir: opts.dir === "desc" ? "desc" : "asc", ...window }));
+  if (!preview.ok) return { error: preview.error?.message ?? "Could not preview the table." };
+  const statement = preview.statements[0];
+  return {
+    table,
+    columns: statement?.fields ?? columns.map((column) => column.name),
+    rows: statement?.rows ?? [],
+    offset: window.offset,
+    limit: window.limit,
+    total,
+    browseCap: 500,
+    sort,
+    dir: opts.dir === "desc" ? "desc" : "asc",
+    readOnly: table === "raw_orders" || table === "raw_events",
+  };
+}
+
+export async function profilePlayerTable(handle: SandboxHandle, table: string) {
+  const columns = await publicColumns(handle, table);
+  if (columns.length === 0) return { error: "That table is not in your database yet." as const };
+  const scalar = await runPlayerQuery(handle, scalarProfileSql(table, columns));
+  if (!scalar.ok) return { error: scalar.error?.message ?? "Could not profile the table." };
+  const header = scalar.statements[0]?.rows[0] ?? {};
+  const rows = Number(header.n ?? 0);
+  const blob = (header.columns ?? {}) as Record<string, Record<string, unknown>>;
+  const profiles = [];
+  for (const column of columns) {
+    const stats = blob[column.name] ?? {};
+    const nulls = Number(stats.nulls ?? 0);
+    const numeric = isNumericType(column.dataType);
+    const top = await runPlayerQuery(handle, topValuesSql(table, column.name));
+    if (!top.ok) return { error: top.error?.message ?? `Could not summarize ${column.name}.` };
+    let histogram: { label: string; n: number }[] = [];
+    if (numeric) {
+      const hist = await runPlayerQuery(handle, histogramSql(table, column.name));
+      if (!hist.ok) return { error: hist.error?.message ?? `Could not bin ${column.name}.` };
+      const bins = hist.statements[0]?.rows ?? [];
+      if (bins.length === 0 && stats.min != null && stats.min === stats.max) {
+        histogram = [{ label: String(stats.min), n: Math.max(0, rows - nulls) }];
+      } else {
+        histogram = bins.map((bin) => ({
+          label: bucketLabel(Number(bin.bucket), Number(bin.lo), Number(bin.hi)),
+          n: Number(bin.n),
+        }));
+      }
+    } else {
+      histogram = (top.statements[0]?.rows ?? []).map((row) => ({
+        label: row.value == null ? "null" : String(row.value),
+        n: Number(row.n),
+      }));
+    }
+    profiles.push({
+      name: column.name,
+      dataType: column.dataType,
+      nullable: column.nullable,
+      rows,
+      nulls,
+      nullPct: rows === 0 ? 0 : Math.round((nulls / rows) * 1000) / 10,
+      distinct: Number(stats.distinct ?? 0),
+      min: stats.min == null ? null : String(stats.min),
+      max: stats.max == null ? null : String(stats.max),
+      mean: numeric ? asNumber(stats.mean) : null,
+      median: numeric ? asNumber(stats.median) : null,
+      top: (top.statements[0]?.rows ?? []).map((row) => ({
+        value: row.value == null ? "null" : String(row.value),
+        n: Number(row.n),
+      })),
+      histogram,
+    });
+  }
+  return { table, rows, columns: profiles, readOnly: table === "raw_orders" || table === "raw_events" };
+}
+
+export async function writePlayerTable(
+  handle: SandboxHandle,
+  name: string,
+  columns: { name: string; dtype: string }[],
+  rows: unknown[][],
+) {
+  if (rows.length > NOTEBOOK_ROW_CAP) {
+    throw new Error(`A notebook write stops at ${NOTEBOOK_ROW_CAP} rows.`);
+  }
+  const built = dropCreateSql(name, columns);
+  assertSafe(built.drop);
+  assertSafe(built.create);
+  assertWritableTable(name);
+  const client = clientFor(handle.sandboxDb, handle.sandboxUser, handle.sandboxPassword);
+  await client.connect();
+  try {
+    await client.query(`SET statement_timeout = '${config.statementTimeoutMs}ms'`);
+    await client.query("BEGIN");
+    await client.query(built.drop);
+    await client.query(built.create);
+    const quotedCols = columns.map((column) => quoteIdent(column.name)).join(", ");
+    const width = columns.length;
+    for (let start = 0; start < rows.length; start += 200) {
+      const chunk = rows.slice(start, start + 200);
+      const params: unknown[] = [];
+      const groups = chunk.map((row) => {
+        const slots = columns.map((_, index) => {
+          params.push(row[index] ?? null);
+          return `$${params.length}`;
+        });
+        if (row.length !== width) throw new Error("A notebook row does not match the columns.");
+        return `(${slots.join(", ")})`;
+      });
+      await client.query(`INSERT INTO public.${quoteIdent(assertWritableTable(name))} (${quotedCols}) VALUES ${groups.join(", ")}`, params);
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    await client.end();
+  }
+  return { table: assertWritableTable(name), rows: rows.length };
 }
 
 export function touched(sql: string): string[] {

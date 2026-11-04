@@ -83,7 +83,16 @@ const DIMENSIONS: { id: string; label: string; names: string[] }[] = [
   {
     id: "curiosity",
     label: "Curiosity",
-    names: ["schema_explored", "clarifying_question", "clarifying_question_asked", "kt_question", "glossary_viewed"],
+    names: [
+      "schema_explored",
+      "clarifying_question",
+      "clarifying_question_asked",
+      "kt_question",
+      "glossary_viewed",
+      "table_previewed",
+      "column_profiled",
+      "notebook_cell_run",
+    ],
   },
   {
     id: "creativity",

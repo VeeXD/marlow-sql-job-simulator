@@ -45,6 +45,9 @@ export const TELEMETRY_EVENTS: TelemetryEventName[] = [
   "tour_completed",
   "tour_replayed",
   "glossary_viewed",
+  "table_previewed",
+  "column_profiled",
+  "notebook_cell_run",
 ];
 
 /** Consequences change how people talk to you. They never close a tool. */

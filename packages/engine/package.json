@@ -5,7 +5,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./glossary": "./src/glossary.ts"
+    "./glossary": "./src/glossary.ts",
+    "./tour": "./src/tour.ts",
+    "./profile": "./src/profile.ts"
   },
   "scripts": {
     "test": "vitest run",
