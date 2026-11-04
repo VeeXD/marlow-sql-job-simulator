@@ -83,7 +83,7 @@ const DIMENSIONS: { id: string; label: string; names: string[] }[] = [
   {
     id: "curiosity",
     label: "Curiosity",
-    names: ["schema_explored", "clarifying_question", "clarifying_question_asked", "kt_question"],
+    names: ["schema_explored", "clarifying_question", "clarifying_question_asked", "kt_question", "glossary_viewed"],
   },
   {
     id: "creativity",
@@ -112,6 +112,14 @@ const DIMENSIONS: { id: string; label: string; names: string[] }[] = [
       "kt_joined",
       "kt_topic_covered",
       "kt_completed",
+      "meeting_reminder",
+      "meeting_missed",
+      "meeting_acked",
+      "tour_started",
+      "tour_step",
+      "tour_skipped",
+      "tour_completed",
+      "tour_replayed",
     ],
   },
 ];

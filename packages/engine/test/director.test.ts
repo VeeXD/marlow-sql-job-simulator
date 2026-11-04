@@ -167,18 +167,25 @@ describe("director", () => {
 });
 
 describe("knowledge transfer", () => {
-  it("covers the brief, logs questions, and wraps", () => {
+  it("covers the brief in short turns, logs questions, and wraps", () => {
     let state = createInitialState({ playerName: "Alex Morgan", difficulty: "guided" });
     state = reduce(state, { type: "start" }).state;
     const joined = reduce(state, { type: "join_kt" });
     state = joined.state;
     expect(state.kt.status).toBe("live");
-    const topics = joined.effects
-      .filter((effect) => effect.type === "telemetry" && effect.name === "kt_topic_covered")
-      .map((effect) => (effect.type === "telemetry" ? effect.payload.topic : ""));
-    expect(topics).toEqual(["company", "project", "landscape", "role", "duties", "who", "arrival", "done", "week"]);
-    expect(state.messages.some((message) => message.channel === "meeting:kt" && message.body.includes("Finance stopped trusting"))).toBe(true);
+    const opened = state.messages.filter((message) => message.channel === "meeting:kt");
+    expect(opened.length).toBeGreaterThan(0);
+    expect(opened.length).toBeLessThanOrEqual(3);
+    expect(opened.some((message) => message.body.includes("Finance stopped trusting"))).toBe(true);
+    expect(state.messages.every((message) => message.reaction == null)).toBe(true);
     audit(state, 0);
+    let guard = 0;
+    while (state.kt.topicsCovered.length < 9 && guard < 40) {
+      state = reduce(state, { type: "player_message", channel: "meeting:kt", body: "go on" }).state;
+      guard += 1;
+    }
+    expect(state.kt.topicsCovered).toEqual(["company", "project", "landscape", "role", "duties", "who", "arrival", "done", "week"]);
+    expect(state.kt.questionsAsked).toBe(0);
     const asked = reduce(state, {
       type: "player_message",
       channel: "meeting:kt",
@@ -187,11 +194,90 @@ describe("knowledge transfer", () => {
     state = asked.state;
     expect(state.kt.questionsAsked).toBe(1);
     expect(asked.effects.some((effect) => effect.type === "telemetry" && effect.name === "kt_question")).toBe(true);
+    const reply = state.messages.filter((message) => message.replyToId);
+    expect(reply.length).toBeGreaterThan(0);
     audit(state, 0);
     const done = reduce(state, { type: "complete_kt" });
     expect(done.state.kt.status).toBe("done");
     expect(done.effects.some((effect) => effect.type === "telemetry" && effect.name === "kt_completed")).toBe(true);
     audit(done.state, 0);
+  });
+});
+
+describe("meetings, pacing, reactions, and the tour", () => {
+  it("warns 10 and 1 minutes before a meeting and notes a miss", () => {
+    let state = createInitialState({ playerName: "Alex", difficulty: "guided" });
+    state = reduce(state, { type: "start" }).state;
+    state = step(state, 10);
+    const soon = state.notices.find((notice) => notice.meetingId === "kt" && notice.leadMinutes === 10);
+    expect(soon?.kind).toBe("meeting_soon");
+    expect(soon?.action).toBe("join");
+    expect(soon?.body).toMatch(/10 minutes/);
+    state = step(state, 9);
+    expect(state.notices.some((notice) => notice.meetingId === "kt" && notice.leadMinutes === 1)).toBe(true);
+    state = step(state, 31);
+    expect(state.meetings.kt).toBe("missed");
+    expect(state.notices.some((notice) => notice.kind === "meeting_missed" && notice.meetingId === "kt")).toBe(true);
+  });
+
+  it("does not mark a joined knowledge transfer as missed, and keeps the opening turn short", () => {
+    let state = createInitialState({ playerName: "Alex", difficulty: "standard", tour: false });
+    state = reduce(state, { type: "start" }).state;
+    expect(state.messages.length).toBeLessThanOrEqual(2);
+    expect(state.tour.status).toBe("off");
+    state = reduce(state, { type: "join_kt" }).state;
+    state = step(state, 60);
+    expect(state.notices.some((notice) => notice.kind === "meeting_missed" && notice.meetingId === "kt")).toBe(false);
+    expect(state.meetings.kt).toBe("joined");
+  });
+
+  it("explains churn once, lets the player react, and only rarely reacts to the player", () => {
+    let state = createInitialState({ playerName: "Alex", difficulty: "guided" });
+    state = reduce(state, { type: "start" }).state;
+    state = step(state, TIMELINE.samSketchMin);
+    const explained = state.messages.filter((message) => message.body.includes("customers who stop buying"));
+    expect(explained.length).toBe(1);
+    audit(state, 0);
+    const target = state.messages[0];
+    const reacted = reduce(state, { type: "react", messageId: target.id, emoji: "👍" });
+    expect(reacted.state.messages[0].reactions).toEqual([
+      expect.objectContaining({ emoji: "👍", author: "player" }),
+    ]);
+    const cleared = reduce(reacted.state, { type: "react", messageId: target.id, emoji: "👍" });
+    expect(cleared.state.messages[0].reactions).toEqual([]);
+    expect(state.messages.every((message) => (message.reactions ?? []).every((reaction) => reaction.author === "player"))).toBe(true);
+
+    let cursor = state;
+    for (let i = 0; i < 80; i++) {
+      cursor = reduce(cursor, {
+        type: "player_message",
+        channel: "dm:priya",
+        body: `Checking in on the landing files, note ${i} for the week.`,
+      }).state;
+    }
+    expect(cursor.pendingReactions.length + cursor.messages.filter((message) => message.author === "player" && message.reactions?.some((reaction) => reaction.author !== "player")).length).toBeGreaterThan(0);
+    expect(cursor.pendingReactions.every((item) => cursor.messages.find((message) => message.id === item.messageId)?.author === "player")).toBe(true);
+    const before = cursor.messages.filter((message) => message.author === "player" && message.reactions?.some((reaction) => reaction.author === "priya")).length;
+    cursor = step(cursor, 3);
+    expect(cursor.messages.filter((message) => message.author === "player" && message.reactions?.some((reaction) => reaction.author === "priya")).length).toBe(before);
+    cursor = step(cursor, 4);
+    const earned = cursor.messages.filter((message) => message.author === "player" && message.reactions?.some((reaction) => reaction.author === "priya"));
+    expect(earned.length).toBeGreaterThan(0);
+    expect(cursor.messages.filter((message) => message.author !== "player").every((message) => (message.reactions ?? []).length === 0)).toBe(true);
+    audit(cursor, 0);
+  });
+
+  it("records tour events and starts the guided tour by default", () => {
+    const guided = reduce(createInitialState({ playerName: "Alex", difficulty: "guided" }), { type: "start" });
+    expect(guided.state.tour).toEqual({ status: "active", step: "chat" });
+    expect(guided.effects.some((effect) => effect.type === "telemetry" && effect.name === "tour_started")).toBe(true);
+    const skipped = reduce(guided.state, { type: "tour", action: "skip" });
+    expect(skipped.state.tour.status).toBe("skipped");
+    const replayed = reduce(skipped.state, { type: "tour", action: "replay", step: "chat" });
+    expect(replayed.state.tour).toEqual({ status: "active", step: "chat" });
+    expect(replayed.effects.some((effect) => effect.type === "telemetry" && effect.name === "tour_replayed")).toBe(true);
+    const standard = createInitialState({ playerName: "Alex", difficulty: "standard" });
+    expect(standard.tour.status).toBe("off");
   });
 });
 

@@ -18,7 +18,7 @@ export const CAST: Persona[] = [
     kind: "manager",
     pronouns: "she/her",
     voice:
-      "Manager. Warm, brief, a little dry. You set definitions and deadlines in chat, not memos. Yeah and okay so are fine. You never write SQL or a step-by-step transform.",
+      "Manager. Warm, brief, plain spoken. You set definitions and deadlines in chat, not memos. Yeah and okay so are fine. The first time you say churn, ETL, DAG, grain, pipeline, or landing zone, explain it in a few everyday words. You never write SQL or a step-by-step transform.",
     channel: "dm:priya",
   },
   {
@@ -28,7 +28,7 @@ export const CAST: Persona[] = [
     kind: "teammate",
     pronouns: "he/him",
     voice:
-      "Teammate who owns the files. Precise, a bit terse, sometimes two short messages. You point at the ERD. You never write the player's transform.",
+      "Teammate who owns the files. Precise, plain, sometimes two short messages. You point at the ERD. If you say timestamptz, landing zone, or ETL, say what it means in the same breath. You never write the player's transform.",
     channel: "dm:jonah",
   },
   {
@@ -38,7 +38,7 @@ export const CAST: Persona[] = [
     kind: "consumer",
     pronouns: "he/him",
     voice:
-      "Consumer of the churn model. Casual, a little impatient, not a SQL person. You care that churn_features is fresh. You will not invent the query.",
+      "Consumer of the churn model. Casual, a little impatient, not a SQL person. You care that churn_features is fresh. Say what churn means the first time you use the word. You will not invent the query.",
     channel: "dm:sam",
   },
   {
@@ -48,7 +48,7 @@ export const CAST: Persona[] = [
     kind: "stakeholder",
     pronouns: "they/them",
     voice:
-      "Consumer of the exec chart. Friendly, short, they/them. You ask whether the number moved. You are not a SQL person and you say so.",
+      "Consumer of the exec chart. Friendly, short, they/them. You ask whether the number moved. You are not a SQL person and you say so. If you say AOV or pipeline, explain it in a few words.",
     channel: "dm:riley",
   },
 ];

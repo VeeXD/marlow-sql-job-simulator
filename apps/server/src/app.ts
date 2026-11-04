@@ -15,6 +15,9 @@ import {
   postQuery,
   joinKt,
   completeKt,
+  postReact,
+  postTour,
+  ackMeeting,
   runPipelineNow,
   savePipeline,
   recordSignal,
@@ -60,9 +63,11 @@ export async function buildApp() {
         playerName: z.string().trim().min(1).max(40),
         difficulty,
         consent: z.literal(true, { message: "Practice-mode recording has to be accepted before a desk opens." }),
+        tour: z.boolean().optional(),
+        setupSteps: z.array(z.string().trim().min(1).max(40)).max(12).optional(),
       })
       .parse(request.body);
-    return createSession(body.playerName, body.difficulty);
+    return createSession(body.playerName, body.difficulty, { tour: body.tour, setupSteps: body.setupSteps });
   });
 
   app.get("/api/sessions/:id", async (request) => {
@@ -78,6 +83,28 @@ export async function buildApp() {
   app.post("/api/sessions/:id/kt/complete", async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     return completeKt(id, tokenFrom(request.headers.authorization));
+  });
+
+  app.post("/api/sessions/:id/react", async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z.object({ messageId: z.string().min(1).max(40), emoji: z.string().min(1).max(8) }).parse(request.body);
+    return postReact(id, tokenFrom(request.headers.authorization), body.messageId, body.emoji);
+  });
+
+  app.post("/api/sessions/:id/tour", async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        action: z.enum(["start", "step", "skip", "complete", "replay"]),
+        step: z.string().trim().min(1).max(40).optional(),
+      })
+      .parse(request.body);
+    return postTour(id, tokenFrom(request.headers.authorization), body.action, body.step);
+  });
+
+  app.post("/api/sessions/:id/meetings/:meetingId/ack", async (request) => {
+    const params = z.object({ id: z.string().uuid(), meetingId: z.string().min(1).max(40) }).parse(request.params);
+    return ackMeeting(params.id, tokenFrom(request.headers.authorization), params.meetingId);
   });
 
   app.post("/api/sessions/:id/chat", async (request) => {
@@ -180,6 +207,11 @@ export async function buildApp() {
           kind: z.literal("typing_cadence"),
           keyCount: z.number().int().min(1).max(10_000),
           medianIntervalMs: z.number().int().min(0).max(600_000),
+        }),
+        z.object({
+          kind: z.literal("glossary_viewed"),
+          term: z.string().trim().min(1).max(40),
+          surface: z.enum(["chat", "ticket", "kt", "system", "review"]).optional(),
         }),
       ])
       .parse(request.body);

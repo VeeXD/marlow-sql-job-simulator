@@ -1,21 +1,21 @@
-import { renderInline } from "@/lib/api";
+"use client";
 
-export function Prose({ text, className }: { text: string; className?: string }) {
+import { GlossaryText, type GlossarySurface } from "@/components/glossary-text";
+
+export function Prose({
+  text,
+  className,
+  surface = "chat",
+}: {
+  text: string;
+  className?: string;
+  surface?: GlossarySurface;
+}) {
   return (
     <p className={className}>
       {text.split("\n").map((line, index) => (
         <span key={index} className="block">
-          {line === ""
-            ? "\u00a0"
-            : renderInline(line).map((part, partIndex) =>
-                part.type === "code" ? (
-                  <code key={partIndex} className="rounded bg-paper px-1 py-0.5 font-mono text-[0.92em]">
-                    {part.value}
-                  </code>
-                ) : (
-                  <span key={partIndex}>{part.value}</span>
-                ),
-              )}
+          {line === "" ? "\u00a0" : <GlossaryText text={line} surface={surface} />}
         </span>
       ))}
     </p>

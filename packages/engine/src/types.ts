@@ -28,6 +28,12 @@ export type GradeResult = {
 
 export type ChatAuthor = "player" | PersonaId;
 
+export type ChatReaction = {
+  emoji: string;
+  author: "player" | PersonaId;
+  atSim: string;
+};
+
 export type ChatMessage = {
   id: string;
   atSim: string;
@@ -36,7 +42,45 @@ export type ChatMessage = {
   authorName: string;
   body: string;
   intent: string;
+  /** @deprecated Auto-reactions are no longer written. Player and earned reactions live on `reactions`. */
   reaction?: string;
+  reactions?: ChatReaction[];
+  replyToId?: string;
+};
+
+export type HeldLine = {
+  persona: PersonaId;
+  channel: string;
+  intent: string;
+  body: string;
+  facts?: string[];
+  playerMessage?: string;
+  replyToId?: string;
+  intact?: boolean;
+};
+
+export type DeskNotice = {
+  id: string;
+  atSim: string;
+  kind: "meeting_soon" | "meeting_missed";
+  meetingId: string;
+  body: string;
+  action: "join" | null;
+  leadMinutes: number | null;
+};
+
+export type PendingReaction = {
+  messageId: string;
+  persona: PersonaId;
+  emoji: string;
+  atSim: string;
+};
+
+export type TourStatus = "off" | "active" | "skipped" | "completed";
+
+export type TourState = {
+  status: TourStatus;
+  step: string | null;
 };
 
 export type TicketState = {
@@ -144,6 +188,14 @@ export type SessionState = {
   seq: number;
   fired: string[];
   messages: ChatMessage[];
+  /** Lines a coworker has not said yet. Released when the player replies, a few at a time. */
+  held: HeldLine[];
+  notices: DeskNotice[];
+  pendingReactions: PendingReaction[];
+  /** Glossary terms already defined in this session, so a word is explained once. */
+  explained: string[];
+  meetings: { kt: "scheduled" | "joined" | "missed"; standup: "scheduled" | "acked" | "missed" };
+  tour: TourState;
   tickets: TicketState[];
   queriedTables: string[];
   hidden: { orderDefinitionUnlocked: boolean };
@@ -211,7 +263,17 @@ export type TelemetryEventName =
   | "kt_joined"
   | "kt_topic_covered"
   | "kt_question"
-  | "kt_completed";
+  | "kt_completed"
+  | "meeting_reminder"
+  | "meeting_missed"
+  | "meeting_acked"
+  | "reaction_added"
+  | "tour_started"
+  | "tour_step"
+  | "tour_skipped"
+  | "tour_completed"
+  | "tour_replayed"
+  | "glossary_viewed";
 
 export type SpeakEffect = {
   type: "speak";
@@ -255,7 +317,10 @@ export type DirectorEvent =
   | { type: "choose_next"; projectId: string }
   | { type: "abandon" }
   | { type: "join_kt" }
-  | { type: "complete_kt" };
+  | { type: "complete_kt" }
+  | { type: "react"; messageId: string; emoji: string }
+  | { type: "ack_meeting"; meetingId: string }
+  | { type: "tour"; action: "start" | "step" | "skip" | "complete" | "replay"; step?: string };
 
 export type ReduceResult = {
   state: SessionState;

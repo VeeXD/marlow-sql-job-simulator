@@ -35,6 +35,16 @@ export const TELEMETRY_EVENTS: TelemetryEventName[] = [
   "kt_topic_covered",
   "kt_question",
   "kt_completed",
+  "meeting_reminder",
+  "meeting_missed",
+  "meeting_acked",
+  "reaction_added",
+  "tour_started",
+  "tour_step",
+  "tour_skipped",
+  "tour_completed",
+  "tour_replayed",
+  "glossary_viewed",
 ];
 
 /** Consequences change how people talk to you. They never close a tool. */

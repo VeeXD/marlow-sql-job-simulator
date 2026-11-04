@@ -20,12 +20,21 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+/**
+ * Mock wording template. The director fallback is already the line a person would say:
+ * short, plain, and — the first time a specialist word appears — one inline definition.
+ * Mock mode does not invent a second draft. It speaks that template.
+ */
+export function mockTemplate(fallback: string): string {
+  return fallback.replace(/[ \t]{2,}/g, " ").trim();
+}
+
 export function createMockProvider(): LlmProvider {
   return {
     id: "mock",
     async complete(req) {
-      if (isAdversarialUser(req.user)) return req.fallback;
-      return req.fallback;
+      if (isAdversarialUser(req.user)) return mockTemplate(req.fallback);
+      return mockTemplate(req.fallback);
     },
   };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, api, readStoredSession } from "@/lib/api";
@@ -8,6 +8,7 @@ import type { Difficulty, World } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { SystemNote } from "@/components/system-note";
 import { Input } from "@/components/ui/input";
+import { SETUP_STEPS, TourLayer } from "@/components/tour-layer";
 
 export function SetupForm() {
   const router = useRouter();
@@ -19,6 +20,10 @@ export function SetupForm() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [hasDesk, setHasDesk] = useState(false);
   const [consent, setConsent] = useState(false);
+  const [tourOn, setTourOn] = useState(true);
+  const [tourStep, setTourStep] = useState(SETUP_STEPS[0].id);
+  const [tourSkipped, setTourSkipped] = useState(false);
+  const seenSteps = useRef<string[]>([SETUP_STEPS[0].id]);
 
   async function load() {
     setLoadError(null);
@@ -31,8 +36,21 @@ export function SetupForm() {
 
   useEffect(() => {
     setHasDesk(Boolean(readStoredSession()));
+    const replay = new URLSearchParams(window.location.search).get("tour") === "replay";
+    if (replay) {
+      setTourOn(true);
+      setTourSkipped(false);
+      setTourStep(SETUP_STEPS[0].id);
+    }
     void load();
   }, []);
+
+  useEffect(() => {
+    const replay = new URLSearchParams(window.location.search).get("tour") === "replay";
+    if (replay) return;
+    if (difficulty === "guided" && !tourSkipped) setTourOn(true);
+    if (difficulty === "standard") setTourOn(false);
+  }, [difficulty, tourSkipped]);
 
   async function start(event: React.FormEvent) {
     event.preventDefault();
@@ -41,7 +59,13 @@ export function SetupForm() {
     try {
       const created = await api<{ id: string; token: string }>("/api/sessions", null, {
         method: "POST",
-        body: JSON.stringify({ playerName: name.trim(), difficulty, consent: true }),
+        body: JSON.stringify({
+          playerName: name.trim(),
+          difficulty,
+          consent: true,
+          tour: tourOn && !tourSkipped,
+          setupSteps: tourOn && !tourSkipped ? seenSteps.current : [],
+        }),
       });
       const { writeStoredSession } = await import("@/lib/api");
       writeStoredSession({ id: created.id, token: created.token });
@@ -111,7 +135,7 @@ export function SetupForm() {
             </ul>
           </section>
 
-          <section>
+          <section data-tour="setup-name">
             <label htmlFor="name" className="text-sm font-medium">
               Name on the offer
             </label>
@@ -125,7 +149,7 @@ export function SetupForm() {
             />
           </section>
 
-          <fieldset>
+          <fieldset data-tour="setup-difficulty">
             <legend className="text-sm font-medium">How much scaffolding</legend>
             <div className="mt-2 grid gap-3 sm:grid-cols-2">
               {world.difficulties.map((option) => {
@@ -150,6 +174,23 @@ export function SetupForm() {
             </div>
           </fieldset>
 
+          {difficulty === "standard" ? (
+            <label className="flex items-start gap-3 text-sm">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={tourOn && !tourSkipped}
+                onChange={(event) => {
+                  setTourSkipped(!event.target.checked);
+                  setTourOn(event.target.checked);
+                  if (event.target.checked) setTourStep(SETUP_STEPS[0].id);
+                }}
+              />
+              <span>Show the tour. Optional on Standard. It walks the offer, then the desk, through your first ticket.</span>
+            </label>
+          ) : null}
+
+          <div data-tour="setup-consent">
           <SystemNote>
             <label className="flex items-start gap-3 text-sm leading-relaxed">
               <input
@@ -166,13 +207,35 @@ export function SetupForm() {
               </span>
             </label>
           </SystemNote>
+          </div>
 
           {submitError ? <p className="text-sm text-clay">{submitError}</p> : null}
 
-          <Button type="submit" size="lg" disabled={submitting || name.trim().length === 0 || !consent}>
+          <Button data-tour="setup-start" type="submit" size="lg" disabled={submitting || name.trim().length === 0 || !consent}>
             {submitting ? "Setting up your database…" : "Sit down at the desk"}
           </Button>
         </form>
+      ) : null}
+      {tourOn && !tourSkipped ? (
+        <TourLayer
+          steps={SETUP_STEPS}
+          stepId={tourStep}
+          onBack={() => {
+            const index = SETUP_STEPS.findIndex((step) => step.id === tourStep);
+            if (index > 0) setTourStep(SETUP_STEPS[index - 1].id);
+          }}
+          finishLabel="Got it"
+          onSkip={() => setTourSkipped(true)}
+          onNext={() => {
+            const index = SETUP_STEPS.findIndex((step) => step.id === tourStep);
+            const next = SETUP_STEPS[index + 1];
+            if (!seenSteps.current.includes(tourStep)) seenSteps.current.push(tourStep);
+            if (next) {
+              if (!seenSteps.current.includes(next.id)) seenSteps.current.push(next.id);
+              setTourStep(next.id);
+            }
+          }}
+        />
       ) : null}
     </main>
   );

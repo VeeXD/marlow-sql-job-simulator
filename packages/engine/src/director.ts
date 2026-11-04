@@ -1,7 +1,8 @@
 import { isDelayFlag, isOrderDefinitionQuestion, isStatusUpdate, isSuggestion } from "./clarify.js";
 import { addMinutes, minutesBetween, minutesSinceStart, SIM_START_ISO } from "./clock.js";
+import { BURST_LIMIT, isAck, paceLines, PLAYER_REACTIONS, rareReaction } from "./dialogue.js";
 import { gradeHandoff } from "./handoff.js";
-import { redactSql } from "./prompt.js";
+import { glossText, redactSql } from "./prompt.js";
 import {
   CONSENT_NOTICE,
   RETENTION_DAYS,
@@ -17,6 +18,7 @@ import type {
   DirectorEvent,
   Effect,
   GradeResult,
+  HeldLine,
   PersonaId,
   PipelineStep,
   ReduceResult,
@@ -53,7 +55,7 @@ const PIPELINE_RULE =
 const BREAK_RULE =
   "After the late file, `clean_orders`, `churn_features`, and `daily_revenue` match the same contracts, and the handoff note covers duplicates, refunds, UTC, the pipeline, and the late file.";
 
-const PIPELINE_BODY = `Sam needs \`churn_features\`. Riley needs \`daily_revenue\`. Build them with an ordered list of SQL steps on a daily schedule (06:00 Pacific). Rebuild from the landing zone every run.
+const PIPELINE_BODY = `Sam needs \`churn_features\` for churn (customers who stop buying). Riley needs \`daily_revenue\` for the exec chart. Build both with a pipeline: a saved list of SQL steps on a daily schedule (06:00 Pacific). A pipeline just runs those steps in order. Rebuild from the landing zone (the raw files as they arrived) every run.
 
 \`churn_features\`
 - \`customer_id\` unique, not null
@@ -71,7 +73,7 @@ const PIPELINE_BODY = `Sam needs \`churn_features\`. Riley needs \`daily_revenue
 
 Your database session is already set to UTC.`;
 
-const PIPELINE_BODY_STANDARD = `Daily pipeline at 06:00 Pacific. Ordered SQL steps, rebuilt from the landing zone.
+const PIPELINE_BODY_STANDARD = `Daily pipeline (a saved list of SQL steps) at 06:00 Pacific. Rebuilt from the landing zone.
 
 \`churn_features\`: unique \`customer_id\`; \`as_of_date\` is the UTC date of the latest \`ordered_at\` in \`clean_orders\`; \`orders_30d\` and \`revenue_30d\` on the inclusive window [\`as_of_date\` - 29 days, \`as_of_date\`]; \`days_since_last_order\`; one row per customer.
 
@@ -147,6 +149,8 @@ export function createInitialState(input: {
   playerName: string;
   difficulty: Difficulty;
   consent?: SessionState["consent"];
+  /** Guided defaults to on. Pass false to skip, true to force it on Standard. */
+  tour?: boolean;
 }): SessionState {
   const name = input.playerName.trim() || "Alex Morgan";
   const standing = { priya: 72, jonah: 72, sam: 72, riley: 72 };
@@ -163,6 +167,15 @@ export function createInitialState(input: {
     seq: 0,
     fired: [],
     messages: [],
+    held: [],
+    notices: [],
+    pendingReactions: [],
+    explained: [],
+    meetings: { kt: "scheduled", standup: "scheduled" },
+    tour: {
+      status: (input.tour ?? input.difficulty === "guided") ? "active" : "off",
+      step: (input.tour ?? input.difficulty === "guided") ? "chat" : null,
+    },
     tickets: [
       ticket({
         id: "explore",
@@ -328,19 +341,10 @@ function baseFacts(state: SessionState, persona: PersonaId): string[] {
   return facts;
 }
 
-function speak(
-  state: SessionState,
-  effects: Effect[],
-  opts: {
-    persona: PersonaId;
-    channel: string;
-    intent: string;
-    body: string;
-    facts?: string[];
-    playerMessage?: string;
-    reaction?: string;
-  },
-): void {
+function speak(state: SessionState, effects: Effect[], opts: HeldLine): void {
+  const glossed = glossText(opts.body, state.difficulty, state.explained);
+  state.explained = glossed.explained;
+  const body = glossed.body;
   state.seq += 1;
   const id = `m${state.seq}`;
   state.messages.push({
@@ -349,17 +353,22 @@ function speak(
     channel: opts.channel,
     author: opts.persona,
     authorName: CAST_BY_ID[opts.persona].name,
-    body: opts.body,
+    body,
     intent: opts.intent,
-    reaction: opts.reaction,
+    replyToId: opts.replyToId,
   });
+  const topic = /^kt_([a-z0-9]+)$/.exec(opts.intent);
+  if (topic && state.kt && !state.kt.topicsCovered.includes(topic[1])) {
+    state.kt.topicsCovered.push(topic[1]);
+    effects.push({ type: "telemetry", name: "kt_topic_covered", payload: { topic: topic[1] } });
+  }
   const effect: SpeakEffect = {
     type: "speak",
     messageId: id,
     personaId: opts.persona,
     intent: opts.intent,
     allowedFacts: opts.facts ?? baseFacts(state, opts.persona),
-    fallback: opts.body,
+    fallback: body,
     channel: opts.channel,
     playerMessage: opts.playerMessage ? redactSql(opts.playerMessage) : undefined,
   };
@@ -368,6 +377,160 @@ function speak(
     type: "telemetry",
     name: "chat_message_sent",
     payload: { author: opts.persona, intent: opts.intent, channel: opts.channel },
+  });
+}
+
+function utter(
+  state: SessionState,
+  effects: Effect[],
+  lines: HeldLine[],
+  options?: { hold?: boolean; max?: number },
+): void {
+  const paced = paceLines(lines, options?.max ?? BURST_LIMIT, options?.hold ?? false);
+  for (const line of paced.now) speak(state, effects, line);
+  if (paced.later.length) state.held.push(...paced.later);
+}
+
+function releaseHeld(state: SessionState, effects: Effect[], channel: string, max: number): void {
+  let left = max;
+  const remain: HeldLine[] = [];
+  for (const line of state.held) {
+    if (left > 0 && line.channel === channel) {
+      speak(state, effects, line);
+      left -= 1;
+    } else {
+      remain.push(line);
+    }
+  }
+  state.held = remain;
+}
+
+export const CALENDAR = [
+  {
+    id: "kt" as const,
+    title: "Knowledge transfer",
+    with: "Priya Shah",
+    when: "Monday 9:20 AM PT",
+    startMin: 20,
+    endMin: 50,
+    action: "join" as const,
+  },
+  {
+    id: "standup" as const,
+    title: "Data standup",
+    with: "the commerce team",
+    when: "Tuesday 9:15 AM PT",
+    startMin: 24 * 60 + 15,
+    endMin: 24 * 60 + 30,
+    action: null,
+  },
+];
+
+function pushNotice(
+  state: SessionState,
+  effects: Effect[],
+  notice: Omit<SessionState["notices"][number], "id" | "atSim">,
+): void {
+  const id = `notice-${notice.meetingId}-${notice.kind}-${notice.leadMinutes ?? "missed"}`;
+  if (state.notices.some((item) => item.id === id)) return;
+  state.notices.push({ ...notice, id, atSim: state.simNow });
+  effects.push({
+    type: "telemetry",
+    name: notice.kind === "meeting_missed" ? "meeting_missed" : "meeting_reminder",
+    payload: { meetingId: notice.meetingId, leadMinutes: notice.leadMinutes, noticeId: id },
+  });
+}
+
+function applyMeetingNotices(state: SessionState, effects: Effect[]) {
+  const mins = minutesSinceStart(state.simNow);
+  for (const meeting of CALENDAR) {
+    const attended =
+      meeting.id === "kt" ? state.kt.status !== "scheduled" || state.meetings.kt === "joined" : state.meetings.standup === "acked";
+    if (attended) {
+      once(state, `meet:${meeting.id}:10`);
+      once(state, `meet:${meeting.id}:1`);
+      once(state, `meet:${meeting.id}:missed`);
+      continue;
+    }
+    for (const lead of [10, 1] as const) {
+      if (mins >= meeting.startMin - lead && mins < meeting.endMin && once(state, `meet:${meeting.id}:${lead}`)) {
+        pushNotice(state, effects, {
+          kind: "meeting_soon",
+          meetingId: meeting.id,
+          leadMinutes: lead,
+          action: meeting.action,
+          body:
+            lead === 10
+              ? `${meeting.title} with ${meeting.with} starts in 10 minutes (${meeting.when}).`
+              : `${meeting.title} with ${meeting.with} starts in 1 minute (${meeting.when}).`,
+        });
+      }
+    }
+    if (mins >= meeting.endMin && once(state, `meet:${meeting.id}:missed`)) {
+      if (meeting.id === "kt") state.meetings.kt = "missed";
+      else state.meetings.standup = "missed";
+      pushNotice(state, effects, {
+        kind: "meeting_missed",
+        meetingId: meeting.id,
+        leadMinutes: null,
+        action: meeting.action,
+        body: `You missed ${meeting.title} with ${meeting.with} (${meeting.when}). Nothing is locked. Catch up in chat, or open the notes.`,
+      });
+    }
+  }
+}
+
+export function calendarView(state: SessionState) {
+  const mins = minutesSinceStart(state.simNow);
+  return CALENDAR.map((meeting) => {
+    let phase: "upcoming" | "soon" | "live" | "joined" | "missed" | "done" = "upcoming";
+    if (meeting.id === "kt" && state.kt.status === "done") phase = "done";
+    else if (meeting.id === "kt" && state.kt.status === "live") phase = "joined";
+    else if (meeting.id === "standup" && state.meetings.standup === "acked") phase = "joined";
+    else if ((meeting.id === "kt" && state.meetings.kt === "missed") || (meeting.id === "standup" && state.meetings.standup === "missed")) {
+      phase = "missed";
+    } else if (mins >= meeting.endMin) phase = "missed";
+    else if (mins >= meeting.startMin) phase = "live";
+    else if (mins >= meeting.startMin - 10) phase = "soon";
+    return {
+      id: meeting.id,
+      title: meeting.title,
+      with: meeting.with,
+      when: meeting.when,
+      startAt: addMinutes(SIM_START_ISO, meeting.startMin),
+      endAt: addMinutes(SIM_START_ISO, meeting.endMin),
+      phase,
+      action: meeting.action,
+    };
+  });
+}
+
+function deliverDueReactions(state: SessionState) {
+  const now = Date.parse(state.simNow);
+  const waiting = [];
+  for (const item of state.pendingReactions) {
+    if (Date.parse(item.atSim) > now) {
+      waiting.push(item);
+      continue;
+    }
+    const message = state.messages.find((entry) => entry.id === item.messageId);
+    if (!message || message.author !== "player") continue;
+    message.reactions = message.reactions ?? [];
+    if (message.reactions.some((reaction) => reaction.author === item.persona)) continue;
+    message.reactions.push({ emoji: item.emoji, author: item.persona, atSim: state.simNow });
+  }
+  state.pendingReactions = waiting;
+}
+
+function scheduleReaction(state: SessionState, messageId: string, persona: PersonaId | null, body: string) {
+  if (!persona) return;
+  if (body.trim().length < 12) return;
+  if (!rareReaction(messageId)) return;
+  state.pendingReactions.push({
+    messageId,
+    persona,
+    emoji: "👍",
+    atSim: addMinutes(state.simNow, 6),
   });
 }
 
@@ -441,43 +604,47 @@ function maybeComplete(state: SessionState, effects: Effect[]) {
   if (breakTicket) breakTicket.status = "done";
   bump(state, effects, "priya", 4, "project review");
   effects.push({ type: "telemetry", name: "project_completed", payload: { handoffScore: state.handoff.score } });
-  speak(state, effects, {
-    persona: "priya",
-    channel: "dm:priya",
-    intent: "project_review",
-    body: `${state.playerName}, that's the project. I can defend the orders table, the daily pipeline, and the late file.`,
-  });
-  speak(state, effects, {
-    persona: "priya",
-    channel: "dm:priya",
-    intent: "project_review",
-    body: `Standing sits with me at ${state.standing.priya}, Jonah at ${state.standing.jonah}, Sam at ${state.standing.sam}, Riley at ${state.standing.riley}. Next up is ${NEXT_PROJECT.title}. Say the word and I'll put RC-1 on this board.`,
-    reaction: "👍",
-  });
+  utter(state, effects, [
+    {
+      persona: "priya",
+      channel: "dm:priya",
+      intent: "project_review",
+      body: `${state.playerName}, that's the project. I can defend the orders table, the daily pipeline, and the late file.`,
+    },
+    {
+      persona: "priya",
+      channel: "dm:priya",
+      intent: "project_review",
+      body: `Standing sits with me at ${state.standing.priya}, Jonah at ${state.standing.jonah}, Sam at ${state.standing.sam}, Riley at ${state.standing.riley}. Next up is ${NEXT_PROJECT.title}. Say the word and I'll put RC-1 on this board.`,
+    },
+  ]);
 }
 
 function applyTimeTriggers(state: SessionState, effects: Effect[]) {
+  applyMeetingNotices(state, effects);
   const mins = minutesSinceStart(state.simNow);
   if (mins >= TIMELINE.walkthroughMin && once(state, "walkthrough")) {
     state.onboarding.walkthrough = true;
-    speak(state, effects, {
-      persona: "jonah",
-      channel: "team",
-      intent: "walkthrough",
-      body: `${state.playerName} — two landing tables, both mine: \`raw_orders\` and \`raw_events\`. File drops, not a model.`,
-    });
-    speak(state, effects, {
-      persona: "jonah",
-      channel: "team",
-      intent: "walkthrough",
-      body: "Expect repeated `order_id`s, nulls, and clocks that disagree. `ordered_at` is timestamptz. `ordered_at_local` is Pacific wall time with no zone. Your session time zone is UTC. The ERD is the column list.",
-    });
-    speak(state, effects, {
-      persona: "jonah",
-      channel: "team",
-      intent: "walkthrough",
-      body: "I have not finished the catalog refresh. It is still running. I won't write the clean layer.",
-    });
+    utter(state, effects, [
+      {
+        persona: "jonah",
+        channel: "team",
+        intent: "walkthrough",
+        body: `${state.playerName} — I own two raw tables, \`raw_orders\` and \`raw_events\`. They are file drops, not a cleaned model.`,
+      },
+      {
+        persona: "jonah",
+        channel: "team",
+        intent: "walkthrough",
+        body: "Expect a repeated `order_id`, empty values, and clocks that disagree. `ordered_at` is timestamptz, and `ordered_at_local` is Pacific wall time with no zone. Your session is UTC. The ERD lists the columns.",
+      },
+      {
+        persona: "jonah",
+        channel: "team",
+        intent: "walkthrough",
+        body: "I have not finished the catalog refresh. It is still running. I won't write the clean layer.",
+      },
+    ]);
   }
   if (mins >= TIMELINE.kickoffMin && once(state, "kickoff")) {
     state.onboarding.kickoff = true;
@@ -485,19 +652,20 @@ function applyTimeTriggers(state: SessionState, effects: Effect[]) {
     release(state, effects, "explore");
     release(state, effects, "definition");
     effects.push({ type: "telemetry", name: "onboarding_complete", payload: {} });
-    speak(state, effects, {
-      persona: "priya",
-      channel: "dm:priya",
-      intent: "kickoff",
-      body: "Board's up. Trustworthy orders. Start with MO-1, then MO-2.",
-      reaction: "👍",
-    });
-    speak(state, effects, {
-      persona: "priya",
-      channel: "dm:priya",
-      intent: "kickoff",
-      body: "I won't sign a table until we agree what an order is. Ask me. Don't guess.",
-    });
+    utter(state, effects, [
+      {
+        persona: "priya",
+        channel: "dm:priya",
+        intent: "kickoff",
+        body: "Board's up. This project is Trustworthy orders. Start with MO-1, then MO-2.",
+      },
+      {
+        persona: "priya",
+        channel: "dm:priya",
+        intent: "kickoff",
+        body: "I won't sign a table until we agree what an order is. Ask me in your own words. Don't guess.",
+      },
+    ]);
   }
   if (mins >= TIMELINE.jonahBusyMin && once(state, "jonah_busy")) {
     speak(state, effects, {
@@ -512,7 +680,7 @@ function applyTimeTriggers(state: SessionState, effects: Effect[]) {
       persona: "sam",
       channel: "team",
       intent: "busy_churn",
-      body: "Sketching the churn model on a sample. Honestly, I have not finished the churn wiring. No `churn_features` yet, and I won't invent it.",
+      body: "I'm sketching the churn model on a sample. Honestly, I have not finished the churn wiring. No `churn_features` yet, and I won't invent it.",
     });
   }
   if (mins >= TIMELINE.jonahDoneMin && once(state, "jonah_done")) {
@@ -538,7 +706,7 @@ function applyTimeTriggers(state: SessionState, effects: Effect[]) {
       persona: "priya",
       channel: "dm:priya",
       intent: "nudge_idle",
-      body: "Checking in. MO-1's been quiet. Even a couple of counts on `raw_orders` and `raw_events` would show the shape of the mess.",
+      body: "Checking in. MO-1 has been quiet. Even a couple of counts on `raw_orders` and `raw_events` would show the shape of the mess.",
     });
   }
 
@@ -579,43 +747,58 @@ function applyTimeTriggers(state: SessionState, effects: Effect[]) {
       name: "pressure_window_start",
       payload: { trigger: "injected_break", kinds: ["late_data", "schema_drift", "null_spike"] },
     });
-    speak(state, effects, {
-      persona: "riley",
-      channel: "dm:riley",
-      intent: "break_ping",
-      body: "Hey. Something's off on the exec chart.",
-      reaction: "😬",
-    });
-    speak(state, effects, {
-      persona: "riley",
-      channel: "dm:riley",
-      intent: "break_ping",
-      body: "It still looks like the pre-drop numbers, and finance already has refunds from this morning that I don't. A late file may have hit the landing zone after your run. Can you look? I can't fix `daily_revenue` from here.",
-    });
-    speak(state, effects, {
-      persona: "jonah",
-      channel: "dm:jonah",
-      intent: "break_schema",
-      body: "Heads up. `raw_orders` grew a `promo_code` column, and the same drop has a null spike in `amount_cents`.",
-    });
-    speak(state, effects, {
-      persona: "jonah",
-      channel: "dm:jonah",
-      intent: "break_schema",
-      body: "I won't rewrite the pipeline. Don't trust column order.",
-    });
-    speak(state, effects, {
-      persona: "priya",
-      channel: "dm:priya",
-      intent: "break_assign",
-      body: "Riley's ping is MO-5. Rebuild from the landing zone, then leave a handoff note.",
-    });
-    speak(state, effects, {
-      persona: "priya",
-      channel: "dm:priya",
-      intent: "break_assign",
-      body: "Being late costs standing, not access.",
-    });
+    utter(
+      state,
+      effects,
+      [
+        { persona: "riley", channel: "dm:riley", intent: "break_ping", body: "Hey. The exec chart looks wrong." },
+        {
+          persona: "riley",
+          channel: "dm:riley",
+          intent: "break_ping",
+          body: "It still shows the old numbers, and finance has refunds from this morning that I don't. A late file may have landed after your run. Can you look? I can't fix `daily_revenue` from here.",
+        },
+      ],
+      { max: 2 },
+    );
+    utter(
+      state,
+      effects,
+      [
+        {
+          persona: "jonah",
+          channel: "dm:jonah",
+          intent: "break_schema",
+          body: "Heads up. `raw_orders` grew a `promo_code` column, and the same drop has empty `amount_cents` values.",
+        },
+        {
+          persona: "jonah",
+          channel: "dm:jonah",
+          intent: "break_schema",
+          body: "I won't rewrite your steps. Don't trust column order.",
+        },
+      ],
+      { max: 2 },
+    );
+    utter(
+      state,
+      effects,
+      [
+        {
+          persona: "priya",
+          channel: "dm:priya",
+          intent: "break_assign",
+          body: "Riley's ping is MO-5. Rebuild from the landing zone, then leave a handoff note the next person can trust.",
+        },
+        {
+          persona: "priya",
+          channel: "dm:priya",
+          intent: "break_assign",
+          body: "Being late costs standing, not access.",
+        },
+      ],
+      { max: 2 },
+    );
   }
 }
 
@@ -633,20 +816,21 @@ const KT_TOPICS: { id: string; lines: string[] }[] = [
   {
     id: "company",
     lines: [
-      "Okay. Quick KT, then you can poke around.",
-      "Marlow sells home goods direct. Linens, lighting, kitchen tools. Finance stopped trusting the Thursday revenue chart. That's why this seat exists.",
+      "Marlow sells home goods direct: linens, lighting, and kitchen tools. Say go on when you want the next point.",
+      "Finance stopped trusting the Thursday revenue chart. That's why this seat exists.",
     ],
   },
   {
     id: "project",
     lines: [
-      "The project is Trustworthy orders. One clean table the company will sign, a daily pipeline for the model and the chart, and a late file that shows up after you think you're done.",
+      "The project is Trustworthy orders. One clean table the company will sign, then a daily feed for the model and the chart, then a late file after you think you're done.",
+      "Grain means what one row stands for. The clean table's grain is one row per real order.",
     ],
   },
   {
     id: "landscape",
     lines: [
-      "Data lives in Postgres. Jonah's landing files are `raw_orders` and `raw_events`. Your session time zone is UTC.",
+      "The data lives in Postgres. Jonah's files are `raw_orders` and `raw_events`. Your session time zone is UTC.",
       "`ordered_at` is timestamptz. `ordered_at_local` is Pacific wall time with no zone. The ERD in the header is the column list. I won't walk the transform.",
     ],
   },
@@ -657,7 +841,8 @@ const KT_TOPICS: { id: string; lines: string[] }[] = [
   {
     id: "duties",
     lines: [
-      "Your job this week: learn the landing zone, agree what an order is with me, build the clean table, put a daily pipeline under Sam and Riley, and write a handoff when something breaks.",
+      "This week: learn the raw files, agree what an order is with me, build the clean table, put a daily run under Sam and Riley, and write a handoff when something breaks.",
+      "That daily run is a small pipeline, not a full ETL tool. ETL means extract, transform, load: pull the file, clean it, and publish a table.",
     ],
   },
   {
@@ -692,20 +877,20 @@ function deliverKt(state: SessionState, effects: Effect[]): string | null {
   if (state.kt.status === "live") return "KT is already going.";
   if (state.kt.status === "done") return "KT is already wrapped.";
   state.kt.status = "live";
+  state.meetings.kt = "joined";
   effects.push({ type: "telemetry", name: "kt_joined", payload: {} });
+  const lines: HeldLine[] = [];
   for (const topic of KT_TOPICS) {
     topic.lines.forEach((body, index) => {
-      speak(state, effects, {
+      lines.push({
         persona: "priya",
         channel: "meeting:kt",
-        intent: index === 0 ? `kt_${topic.id}` : `kt_${topic.id}_more`,
+        intent: index === 0 ? `kt_${topic.id}` : `kt_${topic.id}_cont`,
         body,
-        reaction: topic.id === "company" && index === 0 ? "👋" : undefined,
       });
     });
-    state.kt.topicsCovered.push(topic.id);
-    effects.push({ type: "telemetry", name: "kt_topic_covered", payload: { topic: topic.id } });
   }
+  utter(state, effects, lines, { hold: true, max: 3 });
   return null;
 }
 
@@ -745,20 +930,20 @@ function refuse(persona: PersonaId): string {
 }
 
 function smallTalk(persona: PersonaId): string {
-  if (persona === "jonah") return "Hey. Landing files, or something else?";
+  if (persona === "jonah") return "Hey. Is this about the raw files, or something else?";
   if (persona === "sam") return "Hey. If this is about `churn_features`, I'm listening. I won't write the step.";
   if (persona === "riley") return "Hey. If the chart looks weird, say which day. I won't write SQL.";
   return "Hey. What are you stuck on?";
 }
 
 function generic(persona: PersonaId): string {
-  if (persona === "jonah") return "Ask me about the files. Columns, reloads, clocks. The ERD lists `raw_orders` and `raw_events`. I won't write the transform.";
-  if (persona === "sam") return "I only consume `churn_features`. If a number looks wrong, tell me the `as_of_date` you built. I won't write the step.";
+  if (persona === "jonah") return "Ask me about the files. Which column, which reload, or which clock. The ERD lists `raw_orders` and `raw_events`. I won't write the transform.";
+  if (persona === "sam") return "I only read `churn_features`. If a number looks wrong, tell me the `as_of_date` you built. I won't write the step.";
   if (persona === "riley") return "I look at `daily_revenue` by day. If you're unsure what an order is, that's Priya. I'm the chart, not the definition.";
   return "Okay so — which decision are you stuck on? I can unblock a definition. I won't write the SQL.";
 }
 
-function replyTo(state: SessionState, effects: Effect[], channel: string, body: string) {
+function replyTo(state: SessionState, effects: Effect[], channel: string, body: string, replyToId?: string) {
   const persona = personaFor(channel, body);
   if (!persona) return;
   const targetChannel = channel.startsWith("dm:") || channel.startsWith("meeting:") ? channel : "team";
@@ -786,7 +971,7 @@ function replyTo(state: SessionState, effects: Effect[], channel: string, body: 
     text = "A null `order_id`, `customer_id`, or `amount_cents` means the file was short. I leave those rows in the landing zone. Whether they belong downstream is the project rule.";
   } else if (/pipeline|schedule|airflow|dag\b/.test(t)) {
     intent = "hint_pipeline";
-    text = "An ordered list of SQL steps, run daily, is the whole runner. Sam reads `churn_features`. Riley reads `daily_revenue`. The column contract is on the ticket. We are not standing up another scheduler.";
+    text = "Save an ordered list of SQL steps and run it daily. People sometimes call that list a DAG. Sam reads `churn_features`. Riley reads `daily_revenue`. The column contract is on the ticket. We are not standing up another scheduler.";
   } else if (/refund|cancel/.test(t) && state.hidden.orderDefinitionUnlocked) {
     intent = "hint_rule";
     text = `We already settled it. ${ORDER_DEFINITION}`;
@@ -794,13 +979,21 @@ function replyTo(state: SessionState, effects: Effect[], channel: string, body: 
     intent = "hint_rule_locked";
     text = "Refunds and cancellations are in the landing zone on purpose. If you want the rule for `clean_orders`, ask Priya whether those orders belong in the table. I won't guess it.";
   }
-  speak(state, effects, {
-    persona,
-    channel: targetChannel,
-    intent,
-    body: text,
-    playerMessage: body,
-  });
+  utter(
+    state,
+    effects,
+    [
+      {
+        persona,
+        channel: targetChannel,
+        intent,
+        body: text,
+        playerMessage: body,
+        replyToId,
+      },
+    ],
+    { max: 2 },
+  );
 }
 
 function applyVerdict(
@@ -860,6 +1053,17 @@ function notePriority(state: SessionState, effects: Effect[], chosenId: string) 
 export function reduce(input: SessionState, event: DirectorEvent): ReduceResult {
   const state = structuredClone(input);
   if (!state.kt) state.kt = { status: "scheduled", topicsCovered: [], questionsAsked: 0 };
+  if (!state.held) state.held = [];
+  if (!state.notices) state.notices = [];
+  if (!state.pendingReactions) state.pendingReactions = [];
+  if (!state.explained) state.explained = [];
+  if (!state.meetings) state.meetings = { kt: "scheduled", standup: "scheduled" };
+  if (!state.tour) {
+    state.tour = {
+      status: state.difficulty === "guided" ? "active" : "off",
+      step: state.difficulty === "guided" ? "chat" : null,
+    };
+  }
   const effects: Effect[] = [];
   if (state.abandoned && event.type !== "start") {
     return { state, effects, error: "This project was abandoned." };
@@ -872,6 +1076,9 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
       "activity",
       "query",
       "open_ticket",
+      "react",
+      "tour",
+      "ack_meeting",
     ]);
     const cohortSubmit =
       event.type === "submit" && event.ticketId === "cohort" && state.cohort.active && !state.cohort.completed;
@@ -898,31 +1105,42 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
           notice: state.consent.notice,
         },
       });
-      speak(state, effects, {
-        persona: "priya",
-        channel: "dm:priya",
-        intent: "welcome",
-        body: `Hey ${state.playerName}. I'm Priya. I lead data.`,
-        reaction: "👋",
-      });
-      speak(state, effects, {
-        persona: "priya",
-        channel: "dm:priya",
-        intent: "welcome",
-        body: "You're our new analytics engineer on commerce. Jonah owns the raw files. Sam and Riley need numbers they can actually defend.",
-      });
-      speak(state, effects, {
-        persona: "priya",
-        channel: "dm:priya",
-        intent: "welcome",
-        body: "I put a knowledge transfer on your calendar for this morning. Join that before the board fills up. I still won't write the SQL.",
-      });
+      if (state.tour.status === "active") {
+        effects.push({
+          type: "telemetry",
+          name: "tour_started",
+          payload: { auto: state.difficulty === "guided", step: state.tour.step },
+        });
+        effects.push({ type: "telemetry", name: "tour_step", payload: { step: state.tour.step, surface: "desk" } });
+      }
+      utter(
+        state,
+        effects,
+        [
+          {
+            persona: "priya",
+            channel: "dm:priya",
+            intent: "welcome",
+            body: `Hey ${state.playerName}. I'm Priya. I lead the data team.`,
+            intact: true,
+          },
+          {
+            persona: "priya",
+            channel: "dm:priya",
+            intent: "welcome",
+            body: "Your knowledge transfer is on the calendar at 9:20 AM Pacific. Join from the reminder. I still won't write the SQL.",
+            intact: true,
+          },
+        ],
+        { max: 2 },
+      );
       break;
     }
     case "tick": {
       state.simNow = event.simNow;
       state.lastRealSyncAt = event.realNow;
       state.clockPaused = event.paused;
+      deliverDueReactions(state);
       if (!event.paused) applyTimeTriggers(state, effects);
       break;
     }
@@ -938,8 +1156,9 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
       if (body.length > 4000) return { state: input, effects: [], error: "Message is too long." };
       leaveReceive(state);
       state.seq += 1;
+      const playerMessageId = `m${state.seq}`;
       state.messages.push({
-        id: `m${state.seq}`,
+        id: playerMessageId,
         atSim: state.simNow,
         channel: event.channel,
         author: "player",
@@ -965,7 +1184,7 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
         payload: {
           channel: event.channel,
           length: body.length,
-          messageId: `m${state.seq}`,
+          messageId: playerMessageId,
           wallLatencyMs: event.wallLatencyMs ?? null,
           toneFeatures: null,
         },
@@ -980,7 +1199,7 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
             persona: persona ?? "priya",
             why: "player_asked_for_help",
             stuckSimMinutes: Math.max(0, minutesBetween(from, state.simNow)),
-            messageId: `m${state.seq}`,
+            messageId: playerMessageId,
           },
         });
       }
@@ -989,7 +1208,7 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
           type: "telemetry",
           name: "suggestion_made",
           payload: {
-            messageId: `m${state.seq}`,
+            messageId: playerMessageId,
             contentHash: contentHash(body),
             accepted: state.statusCredits < 4,
             persona: "priya",
@@ -1001,7 +1220,7 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
           type: "telemetry",
           name: "improvement_beyond_scope",
           payload: {
-            messageId: `m${state.seq}`,
+            messageId: playerMessageId,
             contentHash: contentHash(body),
             accepted: false,
           },
@@ -1036,7 +1255,7 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
           ticketId: "definition",
           beforeFirstQuery: state.lastQueryAtSim == null,
           hiddenIntentUnlocked: true,
-          messageId: `m${state.seq}`,
+          messageId: playerMessageId,
         };
         effects.push({ type: "telemetry", name: "clarifying_question_asked", payload: clarifying });
         effects.push({ type: "telemetry", name: "clarifying_question", payload: clarifying });
@@ -1048,46 +1267,58 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
           effects.push({
             type: "telemetry",
             name: "kt_question",
-            payload: { messageId: `m${state.seq}`, length: body.length, topic: "definition" },
+            payload: { messageId: playerMessageId, length: body.length, topic: "definition" },
           });
         }
-        speak(state, effects, {
-          persona: "priya",
-          channel,
-          intent: "clarify_definition",
-          body: "Yeah. That's the question finance and I closed.",
-          playerMessage: body,
-        });
-        speak(state, effects, {
-          persona: "priya",
-          channel,
-          intent: "clarify_definition",
-          body: ORDER_DEFINITION,
-          playerMessage: body,
-        });
-        speak(state, effects, {
-          persona: "priya",
-          channel,
-          intent: "clarify_definition",
-          body: "MO-3 is on the board with that rule. I still won't write the query.",
-          playerMessage: body,
-          reaction: "👍",
-        });
+        scheduleReaction(state, playerMessageId, "priya", body);
+        utter(state, effects, [
+          {
+            persona: "priya",
+            channel,
+            intent: "clarify_definition",
+            body: "Yeah. That's the question finance and I closed. Refunded orders and cancelled orders stay out of the clean table.",
+            playerMessage: body,
+            replyToId: playerMessageId,
+          },
+          {
+            persona: "priya",
+            channel,
+            intent: "clarify_definition",
+            body: ORDER_DEFINITION,
+            playerMessage: body,
+            intact: true,
+          },
+          {
+            persona: "priya",
+            channel,
+            intent: "clarify_definition",
+            body: "MO-3 is on the board with that rule. I still won't write the query.",
+            playerMessage: body,
+          },
+        ]);
+      } else if (
+        isAck(body) &&
+        state.held.some((line) => line.channel === event.channel) &&
+        (event.channel !== "meeting:kt" || state.kt.status === "live")
+      ) {
+        releaseHeld(state, effects, event.channel, 2);
       } else if (event.channel === "meeting:kt" && state.kt.status !== "live") {
         speak(state, effects, {
           persona: "priya",
           channel: "meeting:kt",
           intent: "kt_closed",
-          body: "Join the meeting first. It's on your calendar. I'll take questions once we're in there.",
+          body: "Join the meeting first. It's on your calendar at 9:20. I'll take questions once we're in there.",
           playerMessage: body,
+          replyToId: playerMessageId,
         });
       } else {
-        if (event.channel === "meeting:kt") noteKtQuestion(state, effects, body);
+        if (event.channel === "meeting:kt" && !isAck(body)) noteKtQuestion(state, effects, body);
         if ((kind === "status" || kind === "suggestion") && state.statusCredits < 4) {
           state.statusCredits += 1;
           bump(state, effects, "priya", 2, kind === "status" ? "status update" : "suggestion");
         }
-        replyTo(state, effects, event.channel, body);
+        scheduleReaction(state, playerMessageId, personaFor(event.channel, body), body);
+        replyTo(state, effects, event.channel, body, playerMessageId);
       }
       break;
     }
@@ -1386,6 +1617,7 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
     case "complete_kt": {
       if (state.kt.status !== "live") return { state: input, effects: [], error: "Join the knowledge transfer first." };
       state.kt.status = "done";
+      state.held = state.held.filter((line) => line.channel !== "meeting:kt");
       effects.push({
         type: "telemetry",
         name: "kt_completed",
@@ -1396,8 +1628,53 @@ export function reduce(input: SessionState, event: DirectorEvent): ReduceResult 
         channel: "meeting:kt",
         intent: "kt_wrap",
         body: "Good. That's the transfer. Ping me if a definition is fuzzy. I still won't write the query.",
-        reaction: "👍",
       });
+      break;
+    }
+    case "react": {
+      const message = state.messages.find((item) => item.id === event.messageId);
+      if (!message) return { state: input, effects: [], error: "That message isn't in the thread." };
+      if (!PLAYER_REACTIONS.includes(event.emoji as (typeof PLAYER_REACTIONS)[number])) {
+        return { state: input, effects: [], error: "That reaction isn't available." };
+      }
+      message.reactions = message.reactions ?? [];
+      const existing = message.reactions.findIndex((reaction) => reaction.author === "player" && reaction.emoji === event.emoji);
+      if (existing >= 0) message.reactions.splice(existing, 1);
+      else message.reactions.push({ emoji: event.emoji, author: "player", atSim: state.simNow });
+      effects.push({
+        type: "telemetry",
+        name: "reaction_added",
+        payload: { messageId: message.id, emoji: event.emoji, author: "player", removed: existing >= 0 },
+      });
+      break;
+    }
+    case "ack_meeting": {
+      if (event.meetingId !== "standup") return { state: input, effects: [], error: "That meeting can't be marked that way." };
+      state.meetings.standup = "acked";
+      effects.push({ type: "telemetry", name: "meeting_acked", payload: { meetingId: "standup" } });
+      break;
+    }
+    case "tour": {
+      if (event.action === "skip") {
+        state.tour.status = "skipped";
+        effects.push({ type: "telemetry", name: "tour_skipped", payload: { step: state.tour.step } });
+        break;
+      }
+      if (event.action === "complete") {
+        state.tour.status = "completed";
+        effects.push({ type: "telemetry", name: "tour_completed", payload: { step: state.tour.step } });
+        state.tour.step = null;
+        break;
+      }
+      const step = event.step || state.tour.step || "chat";
+      state.tour.status = "active";
+      state.tour.step = step;
+      if (event.action === "replay") {
+        effects.push({ type: "telemetry", name: "tour_replayed", payload: { step } });
+      } else if (event.action === "start") {
+        effects.push({ type: "telemetry", name: "tour_started", payload: { auto: false, step } });
+      }
+      effects.push({ type: "telemetry", name: "tour_step", payload: { step, surface: "desk" } });
       break;
     }
     case "abandon": {

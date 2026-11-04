@@ -23,6 +23,8 @@ export type World = {
   signalsPage?: boolean;
 };
 
+export type ChatReaction = { emoji: string; author: "player" | PersonaId; atSim: string };
+
 export type ChatMessage = {
   id: string;
   atSim: string;
@@ -32,7 +34,32 @@ export type ChatMessage = {
   body: string;
   intent: string;
   reaction?: string;
+  reactions?: ChatReaction[];
+  replyToId?: string;
 };
+
+export type DeskNotice = {
+  id: string;
+  atSim: string;
+  kind: "meeting_soon" | "meeting_missed";
+  meetingId: string;
+  body: string;
+  action: "join" | null;
+  leadMinutes: number | null;
+};
+
+export type CalendarMeeting = {
+  id: string;
+  title: string;
+  with: string;
+  when: string;
+  startAt: string;
+  endAt: string;
+  phase: "upcoming" | "soon" | "live" | "joined" | "missed" | "done";
+  action: "join" | null;
+};
+
+export type TourState = { status: "off" | "active" | "skipped" | "completed"; step: string | null };
 
 export type Ticket = {
   id: string;
@@ -60,6 +87,10 @@ export type Session = {
   standing: Record<PersonaId, number>;
   standingLog: { persona: PersonaId; delta: number; reason: string; simNow: string; standing: number }[];
   messages: ChatMessage[];
+  notices?: DeskNotice[];
+  calendar?: CalendarMeeting[];
+  waiting?: { channel: string; authorName: string; remaining: number }[];
+  tour?: TourState;
   tickets: Ticket[];
   onboarding: { welcome: boolean; walkthrough: boolean; kickoff: boolean };
   kt: { status: "scheduled" | "live" | "done"; topicsCovered: string[]; questionsAsked: number };

@@ -21,12 +21,15 @@ import {
   CHANNELS_DM,
   STAGE_LABELS,
   type ChatMessage,
+  type DeskNotice,
   type PersonaId,
   type QueryResult,
   type SchemaPayload,
   type Session,
   type Ticket,
 } from "@/lib/types";
+import { DESK_STEPS, TourLayer } from "@/components/tour-layer";
+import { GlossaryLogProvider, GlossaryText } from "@/components/glossary-text";
 import { SystemNote } from "@/components/system-note";
 import { Prose } from "@/components/prose";
 import { SqlEditor } from "@/components/sql-editor";
@@ -65,6 +68,11 @@ export function Workplace() {
   const [connOpen, setConnOpen] = useState(false);
   const [ticket, setTicket] = useState<Ticket | null>(null);
   const [leaveOpen, setLeaveOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [toasts, setToasts] = useState<DeskNotice[]>([]);
+  const [readNotices, setReadNotices] = useState<string[]>([]);
+  const toasted = useRef<Set<string> | null>(null);
+  const lastTourStep = useRef<string | null>(null);
   const keyTimes = useRef<number[]>([]);
 
   const postSignal = useCallback((body: Record<string, unknown>) => {
@@ -116,6 +124,73 @@ export function Workplace() {
     if (!erdOpen) return;
     postSignal({ kind: "erd_opened" });
   }, [erdOpen, postSignal]);
+
+  const tourStep = session?.tour?.status === "active" ? session.tour.step : null;
+  useEffect(() => {
+    if (!tourStep) return;
+    if (lastTourStep.current !== tourStep) {
+      lastTourStep.current = tourStep;
+      const paneFor: Partial<Record<string, Pane>> = {
+        chat: "chat",
+        kt: "calendar",
+        calendar: "calendar",
+        board: "board",
+        connections: "board",
+        workbench: "workbench",
+        "run-query": "workbench",
+        submit: "board",
+        feedback: "board",
+      };
+      const next = paneFor[tourStep];
+      if (next) setPane(next);
+      if (tourStep === "workbench" || tourStep === "run-query") setBench("sql");
+    }
+    if (tourStep === "feedback") {
+      const explore = session?.tickets.find((item) => item.id === "explore");
+      if (explore?.lastVerdict) setTicket(explore);
+    }
+  }, [tourStep, session?.tickets]);
+
+  useEffect(() => {
+    if (!session?.id) return;
+    const stored = sessionStorage.getItem(`marlow.notices.${session.id}`);
+    if (stored) {
+      try {
+        setReadNotices(JSON.parse(stored) as string[]);
+      } catch {
+        setReadNotices([]);
+      }
+    }
+    toasted.current = null;
+  }, [session?.id]);
+
+  useEffect(() => {
+    if (!session?.id) return;
+    const key = `marlow.toast.${session.id}`;
+    if (!toasted.current) {
+      try {
+        toasted.current = new Set(JSON.parse(sessionStorage.getItem(key) || "[]") as string[]);
+      } catch {
+        toasted.current = new Set();
+      }
+    }
+    const known = toasted.current;
+    const fresh = (session.notices ?? []).filter((notice) => !known.has(notice.id));
+    if (!fresh.length) return;
+    for (const notice of fresh) known.add(notice.id);
+    sessionStorage.setItem(key, JSON.stringify([...known]));
+    const latestByMeeting = new Map<string, DeskNotice>();
+    for (const notice of fresh) latestByMeeting.set(notice.meetingId, notice);
+    const incoming = [...latestByMeeting.values()];
+    setToasts((current) => {
+      const replaced = new Set(incoming.map((notice) => notice.meetingId));
+      return [...current.filter((item) => !replaced.has(item.meetingId)), ...incoming].slice(-3);
+    });
+    const timers = fresh.map((notice) => window.setTimeout(() => setToasts((current) => current.filter((item) => item.id !== notice.id)), 14000));
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, [session?.id, session?.notices]);
 
   const commit = useCallback((mine: number, next: Session) => {
     if (mine === gen.current) setSession(next);
@@ -230,6 +305,54 @@ export function Workplace() {
       ]
     : [];
 
+  const notices = session.notices ?? [];
+  const unreadNotices = notices.filter((notice) => !readNotices.includes(notice.id)).length;
+  const bannerNotice = [...notices].reverse().find((notice) => !readNotices.includes(notice.id)) ?? null;
+
+  const markNoticesRead = (ids: string[]) => {
+    setReadNotices((current) => {
+      const next = [...new Set([...current, ...ids])];
+      sessionStorage.setItem(`marlow.notices.${session.id}`, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const sendTour = async (action: "start" | "step" | "skip" | "complete" | "replay", step?: string) => {
+    try {
+      const { mine, value } = await mutate<Session>(`/api/sessions/${session.id}/tour`, {
+        method: "POST",
+        body: JSON.stringify({ action, step }),
+      });
+      commit(mine, value);
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Could not update the tour.");
+    }
+  };
+
+  const reactTo = async (messageId: string, emoji: string) => {
+    try {
+      const { mine, value } = await mutate<Session>(`/api/sessions/${session.id}/react`, {
+        method: "POST",
+        body: JSON.stringify({ messageId, emoji }),
+      });
+      commit(mine, value);
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Could not add that reaction.");
+    }
+  };
+
+  const ackStandup = async () => {
+    try {
+      const { mine, value } = await mutate<Session>(`/api/sessions/${session.id}/meetings/standup/ack`, { method: "POST" });
+      commit(mine, value);
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Could not mark the standup.");
+    }
+  };
+
+  const tourIndex = DESK_STEPS.findIndex((step) => step.id === session.tour?.step);
+  const waitingFor = (channel: string) => session.waiting?.find((item) => item.channel === channel) ?? null;
+
   const sendChat = async (target: string) => {
     const body = draft.trim();
     if (!body) return;
@@ -249,19 +372,32 @@ export function Workplace() {
   }
 
   return (
+    <GlossaryLogProvider
+      onView={(term, surface) => {
+        postSignal({ kind: "glossary_viewed", term, surface });
+      }}
+    >
     <TooltipProvider delayDuration={250}>
       <div className="flex h-dvh flex-col bg-[#f5f5f5] text-[#242424]">
-        <Tabs value={pane} onValueChange={(value) => setPane(value as Pane)} className="flex min-h-0 min-w-0 flex-1 flex-row">
+        <Tabs
+          value={pane}
+          onValueChange={(value) => {
+            setPane(value as Pane);
+            if (value === "calendar") markNoticesRead(notices.map((notice) => notice.id));
+          }}
+          className="flex min-h-0 min-w-0 flex-1 flex-row"
+        >
           <TabsList className="h-full w-[4.5rem] shrink-0 flex-col items-stretch gap-1 border-r border-[#d1d1d1] bg-[#ebebeb] px-1 py-2">
             <p className="px-1 pb-2 text-center text-[10px] font-semibold text-[#464EB8]">Marlow</p>
             <RailButton value="activity" icon={<Bell className="h-5 w-5" />} label="Activity" />
-            <RailButton value="chat" icon={<MessageSquare className="h-5 w-5" />} label="Chat" />
+            <RailButton value="chat" icon={<MessageSquare className="h-5 w-5" />} label="Chat" tour="tour-chat" />
             <RailButton value="teams" icon={<Users className="h-5 w-5" />} label="Teams" />
-            <RailButton value="calendar" icon={<CalendarDays className="h-5 w-5" />} label="Calendar" />
-            <RailButton value="board" icon={<KanbanSquare className="h-5 w-5" />} label="Board" />
-            <RailButton value="workbench" icon={<Database className="h-5 w-5" />} label="Workbench" />
+            <RailButton value="calendar" icon={<CalendarDays className="h-5 w-5" />} label="Calendar" tour="tour-calendar" badge={unreadNotices} />
+            <RailButton value="board" icon={<KanbanSquare className="h-5 w-5" />} label="Board" tour="tour-board" />
+            <RailButton value="workbench" icon={<Database className="h-5 w-5" />} label="Workbench" tour="tour-workbench" />
             <button
               type="button"
+              data-tour="tour-connections"
               onClick={() => setConnOpen(true)}
               className="mt-auto flex flex-col items-center gap-1 rounded-md px-1 py-2 text-[10px] text-[#616161] hover:bg-white"
             >
@@ -336,6 +472,26 @@ export function Workplace() {
                 </button>
               </SystemNote>
             ) : null}
+            {bannerNotice ? (
+              <SystemNote className="flex flex-wrap items-center justify-between gap-3 rounded-none border-x-0" >
+                <span>{bannerNotice.body}</span>
+                <span className="flex gap-2">
+                  {bannerNotice.action === "join" && session.kt?.status !== "done" ? (
+                    <button className="font-semibold underline" onClick={() => void joinMeeting()}>
+                      Join
+                    </button>
+                  ) : null}
+                  {bannerNotice.meetingId === "standup" && session.calendar?.find((meeting) => meeting.id === "standup")?.phase !== "joined" ? (
+                    <button className="font-semibold underline" onClick={() => void ackStandup()}>
+                      I'll be there
+                    </button>
+                  ) : null}
+                  <button className="underline" onClick={() => markNoticesRead([bannerNotice.id])}>
+                    Dismiss
+                  </button>
+                </span>
+              </SystemNote>
+            ) : null}
 
           <TabsContent value="board" className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
             <Board
@@ -375,6 +531,8 @@ export function Workplace() {
               placeholder={channel === "dm:priya" ? "Message Priya" : "Message"}
               provider={session.llmProvider}
               onSubmit={() => void sendChat(channel)}
+              onReact={(messageId, emoji) => void reactTo(messageId, emoji)}
+              waitingNote={waitingFor(channel)}
             />
           </TabsContent>
 
@@ -407,6 +565,8 @@ export function Workplace() {
               placeholder="Message Commerce"
               provider={session.llmProvider}
               onSubmit={() => void sendChat("team")}
+              onReact={(messageId, emoji) => void reactTo(messageId, emoji)}
+              waitingNote={waitingFor("team")}
             />
           </TabsContent>
 
@@ -438,6 +598,8 @@ export function Workplace() {
               placeholder="Ask Priya during the KT"
               provider={session.llmProvider}
               onSubmit={() => void sendChat("meeting:kt")}
+              onReact={(messageId, emoji) => void reactTo(messageId, emoji)}
+              waitingNote={waitingFor("meeting:kt")}
               hideHeader
               layout="transcript"
             />
@@ -492,7 +654,7 @@ export function Workplace() {
           </TabsContent>
 
           <TabsContent value="calendar" className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
-            <Week session={session} onJoin={() => void joinMeeting()} onOpen={() => setPane("meeting")} />
+            <Week session={session} onJoin={() => void joinMeeting()} onOpen={() => setPane("meeting")} onAck={() => void ackStandup()} />
           </TabsContent>
             </div>
         </Tabs>
@@ -505,6 +667,9 @@ export function Workplace() {
                 Signals
               </Link>
             ) : null}
+            <button className="text-[#464EB8] underline" onClick={() => setHelpOpen(true)}>
+              Help
+            </button>
             <button className="text-[#464EB8] underline" onClick={() => setLeaveOpen(true)}>
               Leave the project
             </button>
@@ -539,6 +704,86 @@ export function Workplace() {
           })
         }
       />
+      {toasts.length > 0 ? (
+        <div className="fixed bottom-16 right-4 z-[60] flex w-[min(100%-2rem,22rem)] flex-col gap-2">
+          {toasts.map((notice) => (
+            <SystemNote key={notice.id} className="shadow-lg">
+              <span className="block">{notice.body}</span>
+              <span className="mt-2 flex gap-3">
+                {notice.action === "join" && session.kt?.status !== "done" ? (
+                  <button className="font-semibold underline" onClick={() => void joinMeeting()}>
+                    Join
+                  </button>
+                ) : null}
+                <button className="underline" onClick={() => setToasts((current) => current.filter((item) => item.id !== notice.id))}>
+                  Dismiss
+                </button>
+              </span>
+            </SystemNote>
+          ))}
+        </div>
+      ) : null}
+      {session.tour?.status === "active" && session.tour.step ? (
+        <TourLayer
+          steps={DESK_STEPS}
+          stepId={session.tour.step}
+          onBack={() => {
+            if (tourIndex > 0) void sendTour("step", DESK_STEPS[tourIndex - 1].id);
+          }}
+          onSkip={() => void sendTour("skip")}
+          onNext={() => {
+            if (tourIndex < 0) return;
+            if (tourIndex >= DESK_STEPS.length - 1) void sendTour("complete");
+            else void sendTour("step", DESK_STEPS[tourIndex + 1].id);
+          }}
+        />
+      ) : null}
+      <Dialog open={helpOpen} onOpenChange={setHelpOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Help</DialogTitle>
+            <DialogDescription>
+              The tour walks from chat through Priya&apos;s knowledge transfer, the calendar, MO-1, connections, the workbench, a query, submit, and the verdict. You can skip it and pick it up again.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-wrap gap-2">
+            {session.tour?.status === "active" ? (
+              <Button
+                onClick={() => {
+                  setHelpOpen(false);
+                }}
+              >
+                Resume tour
+              </Button>
+            ) : (
+              <Button
+                onClick={() => {
+                  setHelpOpen(false);
+                  lastTourStep.current = null;
+                  void sendTour(session.tour?.status === "off" ? "start" : "replay", "chat");
+                }}
+              >
+                {session.tour?.status === "completed" || session.tour?.status === "skipped" ? "Replay tour" : "Start tour"}
+              </Button>
+            )}
+            {session.tour?.status === "active" ? (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setHelpOpen(false);
+                  lastTourStep.current = null;
+                  void sendTour("replay", "chat");
+                }}
+              >
+                Replay from chat
+              </Button>
+            ) : null}
+            <Button variant="outline" onClick={() => { setHelpOpen(false); window.location.href = "/?tour=replay"; }}>
+              Replay the offer screen
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
       <Dialog open={leaveOpen} onOpenChange={setLeaveOpen}>
         <DialogContent>
           <DialogHeader>
@@ -567,6 +812,7 @@ export function Workplace() {
         </DialogContent>
       </Dialog>
     </TooltipProvider>
+    </GlossaryLogProvider>
   );
 }
 
@@ -593,10 +839,17 @@ function Avatar({ id, name, presence = "online" }: { id: string; name: string; p
   );
 }
 
-function RailButton({ value, icon, label }: { value: string; icon: ReactNode; label: string }) {
+function RailButton({ value, icon, label, badge, tour }: { value: string; icon: ReactNode; label: string; badge?: number; tour?: string }) {
   return (
-    <TabsTrigger value={value} className="flex h-auto flex-col gap-1 px-1 py-2 text-[10px] data-[state=active]:bg-white data-[state=active]:text-[#464EB8]">
-      {icon}
+    <TabsTrigger value={value} data-tour={tour} className="flex h-auto flex-col gap-1 px-1 py-2 text-[10px] data-[state=active]:bg-white data-[state=active]:text-[#464EB8]">
+      <span className="relative">
+        {icon}
+        {badge ? (
+          <span className="absolute -right-2 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#8A6D00] px-1 text-[9px] font-semibold text-white">
+            {badge}
+          </span>
+        ) : null}
+      </span>
       {label}
     </TabsTrigger>
   );
@@ -625,25 +878,74 @@ function StandingStrip({ session }: { session: Session }) {
   );
 }
 
-function MessageBubble({ message }: { message: Session["messages"][number] }) {
-  const mine = message.author === "player";
+const REACTION_CHOICES = ["👍", "👀", "🎉", "❓", "❤️"];
+
+function readDelay(body: string) {
+  const words = body.trim().split(/\s+/).filter(Boolean).length;
+  return Math.min(3200, Math.max(900, 480 + words * 130));
+}
+
+function ReplyQuote({ messages, id }: { messages: ChatMessage[]; id?: string }) {
+  if (!id) return null;
+  const parent = messages.find((message) => message.id === id);
+  if (!parent) return null;
   return (
-    <article className={`flex gap-2 ${mine ? "flex-row-reverse" : ""}`}>
-      <Avatar id={mine ? "player" : message.author} name={message.authorName} presence={mine ? "online" : "online"} />
-      <div className={`max-w-[36rem] ${mine ? "text-right" : ""}`}>
-        <header className={`mb-1 flex items-baseline gap-2 text-[11px] text-[#616161] ${mine ? "justify-end" : ""}`}>
-          <span className="font-semibold text-[#242424]">{message.authorName}</span>
-          <time>{formatSim(message.atSim)}</time>
-        </header>
-        <div className={`rounded-md px-3 py-2 text-left text-sm leading-relaxed ${mine ? "bg-[#e8ebfa]" : "border border-[#e1e1e1] bg-white"}`}>
-          <Prose text={message.body} />
-        </div>
-        {message.reaction ? (
-          <span className="mt-1 inline-flex rounded-full border border-[#e1e1e1] bg-white px-1.5 text-xs">{message.reaction}</span>
-        ) : null}
-      </div>
-    </article>
+    <p className="mb-1 border-l-2 border-[#464EB8] pl-2 text-left text-xs text-[#616161]">
+      <span className="font-semibold text-[#242424]">{parent.authorName}</span> {parent.body.slice(0, 96)}
+    </p>
   );
+}
+
+function ReactionRow({ message, onReact }: { message: ChatMessage; onReact?: (id: string, emoji: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const reactions = message.reactions ?? [];
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1">
+      {reactions.map((reaction, index) => (
+        <span key={`${reaction.author}-${reaction.emoji}-${index}`} className="inline-flex rounded-full border border-[#e1e1e1] bg-white px-1.5 text-xs" title={reaction.author === "player" ? "You" : reaction.author}>
+          {reaction.emoji}
+        </span>
+      ))}
+      {onReact ? (
+        <span className="relative">
+          <button type="button" className="rounded-full px-1.5 text-xs text-[#616161] hover:bg-white" aria-label={`React to ${message.authorName}`} onClick={() => setOpen((value) => !value)}>
+            React
+          </button>
+          {open ? (
+            <span className="absolute left-0 z-10 mt-1 flex gap-1 rounded-md border border-[#e1e1e1] bg-white p-1 shadow">
+              {REACTION_CHOICES.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  className="rounded px-1 text-sm hover:bg-[#f5f5f5]"
+                  onClick={() => {
+                    onReact(message.id, emoji);
+                    setOpen(false);
+                  }}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </span>
+          ) : null}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function groupConsecutive(messages: ChatMessage[]) {
+  const groups: { key: string; author: ChatMessage["author"]; authorName: string; atSim: string; mine: boolean; messages: ChatMessage[] }[] = [];
+  for (const message of messages) {
+    const mine = message.author === "player";
+    const last = groups.at(-1);
+    if (last && last.author === message.author && last.mine === mine) {
+      last.messages.push(message);
+      continue;
+    }
+    groups.push({ key: message.id, author: message.author, authorName: message.authorName, atSim: message.atSim, mine, messages: [message] });
+  }
+  return groups;
 }
 
 const seenMemory = new Map<string, Set<string>>();
@@ -671,56 +973,24 @@ function persistSeen(sessionId: string, seen: Set<string>) {
   sessionStorage.setItem(`marlow.seen.${sessionId}`, JSON.stringify([...seen]));
 }
 
-function topicOf(message: ChatMessage): string | null {
-  const match = /^kt_([a-z0-9]+)(?:_more)?$/.exec(message.intent);
-  return match ? match[1] : null;
-}
-
-function groupTurns(messages: ChatMessage[]) {
-  const turns: {
-    id: string;
-    authorName: string;
-    atSim: string;
-    topic: string | null;
-    bodies: string[];
-    reaction?: string;
-    mine: boolean;
-  }[] = [];
-  for (const message of messages) {
-    const topic = topicOf(message);
-    const mine = message.author === "player";
-    const last = turns.at(-1);
-    if (last && !mine && !last.mine && last.authorName === message.authorName && topic && topic === last.topic) {
-      last.bodies.push(message.body);
-      if (!last.reaction && message.reaction) last.reaction = message.reaction;
-      continue;
-    }
-    turns.push({
-      id: message.id,
-      authorName: message.authorName,
-      atSim: message.atSim,
-      topic,
-      bodies: [message.body],
-      reaction: message.reaction,
-      mine,
-    });
-  }
-  return turns;
-}
-
-function Transcript({ messages }: { messages: ChatMessage[] }) {
-  const turns = groupTurns(messages);
+function Transcript({ messages, onReact }: { messages: ChatMessage[]; onReact?: (id: string, emoji: string) => void }) {
+  const groups = groupConsecutive(messages);
   return (
     <div className="divide-y divide-[#e1e1e1] bg-white">
-      {turns.map((turn) => (
-        <article key={turn.id} className="grid grid-cols-1 gap-1 px-4 py-3 sm:grid-cols-[7.5rem_1fr] sm:gap-4">
-          <time className="text-xs text-[#616161] sm:pt-0.5">{formatSim(turn.atSim)}</time>
+      {groups.map((group) => (
+        <article key={group.key} className="grid grid-cols-1 gap-1 px-4 py-3 sm:grid-cols-[7.5rem_1fr] sm:gap-4">
+          <time className="text-xs text-[#616161] sm:pt-0.5">{formatSim(group.atSim)}</time>
           <div>
-            <p className={`text-sm font-semibold ${turn.mine ? "text-[#242424]" : "text-[#464EB8]"}`}>{turn.authorName}</p>
-            <Prose text={turn.bodies.join(" ")} className="mt-1 text-sm leading-7 text-[#242424]" />
-            {turn.reaction ? (
-              <span className="mt-2 inline-flex rounded-full border border-[#e1e1e1] bg-[#f5f5f5] px-1.5 text-xs">{turn.reaction}</span>
-            ) : null}
+            <p className={`text-sm font-semibold ${group.mine ? "text-[#242424]" : "text-[#464EB8]"}`}>{group.authorName}</p>
+            <div className="mt-1 space-y-2">
+              {group.messages.map((message) => (
+                <div key={message.id}>
+                  <ReplyQuote messages={messages} id={message.replyToId} />
+                  <Prose text={message.body} surface="kt" className="text-sm leading-7 text-[#242424]" />
+                  <ReactionRow message={message} onReact={onReact} />
+                </div>
+              ))}
+            </div>
           </div>
         </article>
       ))}
@@ -728,7 +998,17 @@ function Transcript({ messages }: { messages: ChatMessage[] }) {
   );
 }
 
-function Thread({ sessionId, messages, layout = "bubbles" }: { sessionId: string; messages: ChatMessage[]; layout?: "bubbles" | "transcript" }) {
+function Thread({
+  sessionId,
+  messages,
+  layout = "bubbles",
+  onReact,
+}: {
+  sessionId: string;
+  messages: ChatMessage[];
+  layout?: "bubbles" | "transcript";
+  onReact?: (id: string, emoji: string) => void;
+}) {
   const queue = useRef<ChatMessage[]>([]);
   const playing = useRef(false);
   const alive = useRef(true);
@@ -773,7 +1053,7 @@ function Thread({ sessionId, messages, layout = "bubbles" }: { sessionId: string
       while (alive.current && queue.current.length > 0) {
         const message = queue.current[0];
         setTypingName(message.authorName);
-        await new Promise((resolve) => setTimeout(resolve, 680));
+        await new Promise((resolve) => setTimeout(resolve, readDelay(message.body)));
         if (!alive.current) break;
         if (queue.current[0]?.id !== message.id) continue;
         queue.current.shift();
@@ -809,9 +1089,30 @@ function Thread({ sessionId, messages, layout = "bubbles" }: { sessionId: string
           <SystemNote>Nothing in this thread yet. The clock moves while you work, then pauses if you go quiet.</SystemNote>
         ) : null}
         {layout === "transcript" ? (
-          <Transcript messages={visible} />
+          <Transcript messages={visible} onReact={onReact} />
         ) : (
-          visible.map((message) => <MessageBubble key={message.id} message={message} />)
+          groupConsecutive(visible).map((group) => (
+            <article key={group.key} className={`flex gap-2 ${group.mine ? "flex-row-reverse" : ""}`}>
+              <Avatar id={group.mine ? "player" : group.author} name={group.authorName} presence="online" />
+              <div className={`max-w-[36rem] ${group.mine ? "items-end" : ""} flex flex-col`}>
+                <header className={`mb-1 flex items-baseline gap-2 text-[11px] text-[#616161] ${group.mine ? "justify-end" : ""}`}>
+                  <span className="font-semibold text-[#242424]">{group.authorName}</span>
+                  <time>{formatSim(group.atSim)}</time>
+                </header>
+                <div className="space-y-1">
+                  {group.messages.map((message) => (
+                    <div key={message.id}>
+                      <ReplyQuote messages={visible} id={message.replyToId} />
+                      <div className={`rounded-md px-3 py-2 text-left text-sm leading-relaxed ${group.mine ? "bg-[#e8ebfa]" : "border border-[#e1e1e1] bg-white"}`}>
+                        <Prose text={message.body} />
+                      </div>
+                      <ReactionRow message={message} onReact={onReact} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </article>
+          ))
         )}
         {typingName ? (
           <p className="flex items-center gap-2 text-xs text-[#616161]">
@@ -838,6 +1139,8 @@ function Conversation({
   placeholder,
   provider,
   onSubmit,
+  onReact,
+  waitingNote = null,
   hideHeader = false,
   layout = "bubbles",
 }: {
@@ -850,6 +1153,8 @@ function Conversation({
   placeholder: string;
   provider: string;
   onSubmit: () => void;
+  onReact?: (id: string, emoji: string) => void;
+  waitingNote?: { authorName: string; remaining: number } | null;
   hideHeader?: boolean;
   layout?: "bubbles" | "transcript";
 }) {
@@ -860,7 +1165,12 @@ function Conversation({
           <p className="text-sm font-semibold">{title}</p>
         </div>
       )}
-      <Thread sessionId={sessionId} messages={messages} layout={layout} />
+      <Thread sessionId={sessionId} messages={messages} layout={layout} onReact={onReact} />
+      {waitingNote ? (
+        <SystemNote className="mx-3 mb-2 text-xs">
+          {waitingNote.authorName} is waiting on you before saying more. A short reply, or &quot;go on&quot;, continues the thread.
+        </SystemNote>
+      ) : null}
       <form
         className="border-t border-[#e1e1e1] bg-white p-3"
         onSubmit={(event) => {
@@ -975,7 +1285,9 @@ function Board({ session, onOpen }: { session: Session; onOpen: (ticket: Ticket)
       <section className="rounded-lg border border-line bg-card p-4">
         <p className="text-xs uppercase tracking-wide text-muted">Epic {session.project.epicKey}</p>
         <h2 className="font-serif text-2xl">{session.project.title}</h2>
-        <p className="mt-1 max-w-3xl text-sm text-muted">{session.project.summary}</p>
+        <p className="mt-1 max-w-3xl text-sm text-muted">
+          <GlossaryText text={session.project.summary} surface="ticket" />
+        </p>
       </section>
       {session.cohort?.active ? (
         <section className="rounded-lg border border-pine/40 bg-[#eef4f1] p-4">
@@ -989,8 +1301,8 @@ function Board({ session, onOpen }: { session: Session; onOpen: (ticket: Ticket)
       ) : null}
       {session.review ? <ReviewCard session={session} /> : null}
       {session.tickets.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-line bg-card p-6 text-sm text-muted">
-          The board is empty. Priya puts the epic up after the welcome and Jonah&apos;s schema walkthrough. Stay on the thread — the clock is moving.
+        <p data-tour="tour-mo1" className="rounded-lg border border-dashed border-line bg-card p-6 text-sm text-muted">
+          The board is empty. Priya puts MO-1 up after the welcome and Jonah&apos;s schema walkthrough. Stay on the thread — the clock is moving.
         </p>
       ) : (
         <div className="grid gap-3 lg:grid-cols-3">
@@ -1006,13 +1318,16 @@ function Board({ session, onOpen }: { session: Session; onOpen: (ticket: Ticket)
                   .map((item) => (
                     <button
                       key={item.id}
+                      data-tour={item.id === "explore" ? "tour-mo1" : undefined}
                       onClick={() => onOpen(item)}
                       className={`w-full rounded-md border bg-card p-3 text-left shadow-sm hover:border-pine/40 ${
                         item.id === "break" && session.breakStatus === "active" ? "border-clay" : "border-line"
                       }`}
                     >
                       <span className="text-[11px] text-muted">{item.key}</span>
-                      <span className="mt-0.5 block text-sm font-medium">{item.title}</span>
+                      <span className="mt-0.5 block text-sm font-medium">
+                        <GlossaryText text={item.title} surface="ticket" />
+                      </span>
                       <span className="mt-2 block text-[11px] text-muted">Due {formatSim(item.dueAt)}</span>
                     </button>
                   ))}
@@ -1039,7 +1354,7 @@ function ReviewCard({ session }: { session: Session }) {
   return (
     <section className="rounded-lg border border-pine/30 bg-[#eef4f1] p-4">
       <p className="text-xs uppercase tracking-wide text-pine">Project review</p>
-      <Prose text={review.summary} className="mt-2 text-sm leading-relaxed" />
+      <Prose text={review.summary} surface="review" className="mt-2 text-sm leading-relaxed" />
       <p className="mt-2 text-xs text-muted">
         Handoff checklist {review.handoffScore}/{review.handoffTotal}.
         {session.cohort?.completed
@@ -1081,7 +1396,7 @@ function Workbench({
           <p className="text-sm text-muted">Your writable database. Landing tables are read-only. Engine errors are unchanged.</p>
           {notice ? <SystemNote className="mt-2 max-w-xl text-xs">{notice}</SystemNote> : null}
         </div>
-        <Button onClick={onRun} disabled={running || sql.trim().length === 0}>
+        <Button data-tour="tour-run" onClick={onRun} disabled={running || sql.trim().length === 0}>
           <Play className="h-3.5 w-3.5" />
           {running ? "Running…" : "Run"}
         </Button>
@@ -1342,7 +1657,7 @@ function PipelinePane({
   );
 }
 
-function Week({ session, onJoin, onOpen }: { session: Session; onJoin: () => void; onOpen: () => void }) {
+function Week({ session, onJoin, onOpen, onAck }: { session: Session; onJoin: () => void; onOpen: () => void; onAck: () => void }) {
   const now = simParts(session.simNow);
   const days = ["Mon", "Tue", "Wed", "Thu", "Fri"];
   const events = useMemo(
@@ -1366,9 +1681,39 @@ function Week({ session, onJoin, onOpen }: { session: Session; onJoin: () => voi
           {session.pipeline.enabled ? `The daily pipeline is set for ${scheduleLabel}.` : "The daily pipeline is off until steps are saved."}
         </SystemNote>
       </div>
+      <div className="space-y-2">
+        {(session.notices ?? []).map((notice) => (
+          <SystemNote key={notice.id}>{notice.body}</SystemNote>
+        ))}
+      </div>
+      {(session.calendar ?? []).map((meeting) => (
+        <section key={meeting.id} data-tour={meeting.id === "kt" ? "tour-kt" : undefined} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#e1e1e1] bg-white p-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-[#464EB8]">
+              {meeting.when} · {meeting.phase}
+            </p>
+            <h3 className="text-lg font-semibold">{meeting.title}</h3>
+            <p className="text-sm text-[#616161]">{meeting.with}</p>
+          </div>
+          {meeting.id === "kt" ? (
+            session.kt?.status === "done" ? (
+              <Button variant="outline" onClick={onOpen}>Open transcript</Button>
+            ) : session.kt?.status === "live" ? (
+              <Button onClick={onOpen}>Back to the meeting</Button>
+            ) : (
+              <Button onClick={onJoin}>Join</Button>
+            )
+          ) : meeting.phase === "joined" ? (
+            <Button variant="outline" disabled>You'll be there</Button>
+          ) : (
+            <Button variant="outline" onClick={onAck}>I'll be there</Button>
+          )}
+        </section>
+      ))}
+      {(session.calendar ?? []).length === 0 ? (
       <section className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#e1e1e1] bg-white p-4">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-[#464EB8]">Monday 9:00 AM</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-[#464EB8]">Monday 9:20 AM</p>
           <h3 className="text-lg font-semibold">Knowledge transfer</h3>
           <p className="text-sm text-[#616161]">Priya Shah · company, project, data, your role, and the first week.</p>
         </div>
@@ -1380,6 +1725,7 @@ function Week({ session, onJoin, onOpen }: { session: Session; onJoin: () => voi
           <Button onClick={onJoin}>Join knowledge transfer</Button>
         )}
       </section>
+      ) : null}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
         {days.map((day, index) => {
           const active = now?.weekday.startsWith(day);
@@ -1605,28 +1951,28 @@ function TicketDialog({
           <>
             <DialogHeader>
               <DialogTitle>
-                {ticket.key} · {ticket.title}
+                {ticket.key} · <GlossaryText text={ticket.title} surface="ticket" />
               </DialogTitle>
               <DialogDescription>Due {formatSim(ticket.dueAt)}</DialogDescription>
             </DialogHeader>
             <Badge variant={ticket.status === "done" ? "done" : ticket.status === "in_progress" ? "progress" : "ready"}>
               {ticket.status.replace("_", " ")}
             </Badge>
-            <Prose text={ticket.body} className="text-sm leading-relaxed" />
+            <Prose text={ticket.body} surface="ticket" className="text-sm leading-relaxed" />
             <section className="rounded-md bg-paper p-3 text-sm">
               <p className="text-xs uppercase tracking-wide text-muted">What done means</p>
-              <Prose text={ticket.evaluationRule} className="mt-1" />
+              <Prose text={ticket.evaluationRule} surface="ticket" className="mt-1" />
             </section>
             {ticket.coachNotes ? (
               <section className="rounded-md border border-pine/20 bg-[#eef4f1] p-3 text-sm">
                 <p className="text-xs uppercase tracking-wide text-pine">Guided note</p>
-                <Prose text={ticket.coachNotes} className="mt-1" />
+                <Prose text={ticket.coachNotes} surface="ticket" className="mt-1" />
               </section>
             ) : null}
             {ticket.lastVerdict ? (
-              <section className={`rounded-md p-3 text-sm ${ticket.lastVerdict.passed ? "bg-[#e5f0e6]" : "bg-[#f8e8e4]"}`}>
+              <section data-tour="tour-verdict" className={`rounded-md p-3 text-sm ${ticket.lastVerdict.passed ? "bg-[#e5f0e6]" : "bg-[#f8e8e4]"}`}>
                 <p className="text-xs uppercase tracking-wide">{ticket.lastVerdict.passed ? "Verdict" : "Sent back"}</p>
-                <Prose text={ticket.lastVerdict.summary} className="mt-1" />
+                <Prose text={ticket.lastVerdict.summary} surface="ticket" className="mt-1" />
               </section>
             ) : null}
             <SystemNote>Submit for verdict asks the person who owns the ticket. It is not a model review, and it does not lock the database.</SystemNote>

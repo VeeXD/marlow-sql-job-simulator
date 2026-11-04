@@ -10,6 +10,7 @@ export * from "./seed.js";
 export * from "./reference.js";
 export * from "./runner.js";
 export * from "./grading.js";
+export * from "./glossary.js";
 export * from "./prompt.js";
 export * from "./director.js";
 export * from "./guardrails.js";

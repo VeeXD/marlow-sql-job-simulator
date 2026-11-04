@@ -12,8 +12,10 @@ import {
   SCHEMA_CATALOG,
   addMinutes,
   advanceSimNow,
+  calendarView,
   contentHash,
   createInitialState,
+  glossaryEntry,
   createProviderFromEnv,
   dailySlotsCrossed,
   errorClass,
@@ -90,7 +92,9 @@ const provider = {
 
 function narrativeStamp(state: SessionState): string {
   return JSON.stringify({
-    messages: state.messages.map((message) => [message.id, message.body, message.intent]),
+    messages: state.messages.map((message) => [message.id, message.body, message.intent, message.reactions?.length ?? 0, message.replyToId ?? ""]),
+    notices: state.notices?.map((notice) => notice.id) ?? [],
+    tour: state.tour,
     tickets: state.tickets.map((ticket) => [
       ticket.id,
       ticket.released,
@@ -129,6 +133,12 @@ function hydrateState(raw: SessionState): SessionState {
     pressureOpen: raw.pressureOpen ?? false,
     scenarioVersion: raw.scenarioVersion ?? fresh.scenarioVersion,
     seed: raw.seed ?? fresh.seed,
+    held: raw.held ?? [],
+    notices: raw.notices ?? [],
+    pendingReactions: raw.pendingReactions ?? [],
+    explained: raw.explained ?? [],
+    meetings: raw.meetings ?? { kt: "scheduled", standup: "scheduled" },
+    tour: raw.tour ?? fresh.tour,
   };
   if (!state.tickets.some((ticket) => ticket.id === "cohort")) {
     const cohort = fresh.tickets.find((ticket) => ticket.id === "cohort");
@@ -345,6 +355,10 @@ export function toDto(session: SessionRow) {
     standing: state.standing,
     standingLog: state.standingLog.slice(-12),
     messages: state.messages,
+    notices: state.notices ?? [],
+    calendar: calendarView(state),
+    waiting: waitingOn(state),
+    tour: state.tour ?? { status: state.difficulty === "guided" ? "active" : "off", step: state.difficulty === "guided" ? "chat" : null },
     tickets: state.tickets
       .filter((ticket) => ticket.released)
       .map(({ hiddenEvaluation: _hidden, ...ticket }) => ticket),
@@ -389,13 +403,31 @@ async function touch(ctx: Context): Promise<void> {
   await dispatch(ctx, { type: "activity", realNow: Date.now() });
 }
 
-export async function createSession(playerName: string, difficulty: Difficulty) {
+function waitingOn(state: SessionState) {
+  const grouped = new Map<string, { channel: string; authorName: string; remaining: number }>();
+  for (const line of state.held ?? []) {
+    const current = grouped.get(line.channel);
+    if (current) current.remaining += 1;
+    else {
+      const person = CAST.find((member) => member.id === line.persona);
+      grouped.set(line.channel, { channel: line.channel, authorName: person?.name ?? line.persona, remaining: 1 });
+    }
+  }
+  return [...grouped.values()];
+}
+
+export async function createSession(
+  playerName: string,
+  difficulty: Difficulty,
+  options?: { tour?: boolean; setupSteps?: string[] },
+) {
   const id = randomUUID();
   const token = randomBytesToken();
   const handle = await cloneSandbox(id);
   let state = createInitialState({
     playerName,
     difficulty,
+    tour: options?.tour,
     consent: {
       practiceTelemetry: true,
       integritySignals: true,
@@ -405,6 +437,15 @@ export async function createSession(playerName: string, difficulty: Difficulty) 
   });
   const started = reduce(state, { type: "start" });
   state = started.state;
+  if (state.tour.status === "active" && options?.setupSteps?.length) {
+    const setupEvents: Effect[] = options.setupSteps.map((step) => ({
+      type: "telemetry",
+      name: "tour_step",
+      payload: { step, surface: "setup" },
+    }));
+    const index = started.effects.findIndex((effect) => effect.type === "telemetry" && effect.name === "tour_started");
+    started.effects.splice(index + 1, 0, ...setupEvents);
+  }
   await pool.query(
     `INSERT INTO sessions (id, token, player_name, difficulty, sandbox_db, sandbox_user, sandbox_password, state)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
@@ -439,6 +480,30 @@ export async function completeKt(id: string, token: string) {
   return withSession(id, token, async (ctx) => {
     await touch(ctx);
     await dispatch(ctx, { type: "complete_kt" });
+    return toDto(ctx.session);
+  });
+}
+
+export async function postReact(id: string, token: string, messageId: string, emoji: string) {
+  return withSession(id, token, async (ctx) => {
+    await touch(ctx);
+    await dispatch(ctx, { type: "react", messageId, emoji });
+    return toDto(ctx.session);
+  });
+}
+
+export async function postTour(id: string, token: string, action: "start" | "step" | "skip" | "complete" | "replay", step?: string) {
+  return withSession(id, token, async (ctx) => {
+    await touch(ctx);
+    await dispatch(ctx, { type: "tour", action, step });
+    return toDto(ctx.session);
+  });
+}
+
+export async function ackMeeting(id: string, token: string, meetingId: string) {
+  return withSession(id, token, async (ctx) => {
+    await touch(ctx);
+    await dispatch(ctx, { type: "ack_meeting", meetingId });
     return toDto(ctx.session);
   });
 }
@@ -622,9 +687,15 @@ export async function recordSignal(
     | { kind: "table_previewed"; table: string }
     | { kind: "paste"; pasteChars: number }
     | { kind: "focus_loss" }
-    | { kind: "typing_cadence"; keyCount: number; medianIntervalMs: number },
+    | { kind: "typing_cadence"; keyCount: number; medianIntervalMs: number }
+    | { kind: "glossary_viewed"; term: string; surface?: string },
 ) {
   return withSession(id, token, async (ctx) => {
+    if (body.kind === "glossary_viewed") {
+      if (!glossaryEntry(body.term)) throw new HttpError(400, "Unknown glossary term.");
+      await writeTelemetry(ctx, "glossary_viewed", { term: body.term, surface: body.surface ?? "chat" });
+      return { ok: true };
+    }
     if (body.kind === "erd_opened" || body.kind === "table_previewed") {
       await writeTelemetry(ctx, "schema_explored", {
         kind: body.kind,
